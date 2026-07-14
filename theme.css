@@ -1,0 +1,73 @@
+/* ============================================================
+   THEME.CSS — TOUTE L'IDENTITÉ DE MARQUE EST DANS CE SEUL FICHIER.
+   Pour rhabiller l'application aux couleurs d'une autre entreprise,
+   il suffit de changer les valeurs ci-dessous. Rien d'autre.
+   (Le nom de l'entreprise et les initiales du macaron rond se
+   changent, eux, dans l'écran Réglages de l'application.)
+   ============================================================ */
+
+:root {
+  /* --- Fond et surfaces --- */
+  --bg: #070708;          /* noir du site Hybrid */
+  --bg-header: #050506;
+  --surface: #111114;     /* cartes */
+  --surface-2: #17171B;   /* encarts dans les cartes */
+  --surface-3: #1C1C21;   /* survol, champs de formulaire */
+  --line: #232329;        /* bordures 1px */
+  --line-soft: #1B1B20;
+
+  /* --- Texte --- */
+  --text: #F4F4F5;
+  --muted: #8E8E98;
+
+  /* --- Accent de marque : bleu électrique --- */
+  --blue: #2B45FF;
+  --blue-soft: #5C70FF;
+  --blue-deep: #1D33E8;
+
+  /* --- Couleurs de données (sens fixe, ne pas intervertir) --- */
+  --orange: #FF6B35;      /* ads + part du partenaire A (Steph) */
+  --orange-deep: #E8551F;
+  --teal: #2FD6B5;        /* revenus / positif */
+  --red: #FF5C6C;         /* dépenses / retard */
+  --gold: #FFC24B;        /* attention */
+
+  /* --- Fonds translucides des pastilles et badges ---
+     Ce sont les MÊMES couleurs que ci-dessus, en version transparente.
+     Si tu changes une couleur plus haut, change aussi sa ligne ici. */
+  --teal-fond: rgba(47, 214, 181, .12);
+  --red-fond: rgba(255, 92, 108, .12);
+  --red-fond-fort: rgba(255, 92, 108, .35);
+  --gold-fond: rgba(255, 194, 75, .12);
+  --gold-fond-fort: rgba(255, 194, 75, .35);
+  --blue-fond: rgba(43, 69, 255, .14);
+
+  /* --- Contrastes : texte lisible POSÉ SUR une couleur pleine --- */
+  --sur-blue: #FFFFFF;    /* texte sur le bleu (côté Alex) */
+  --sur-orange: #16100B;  /* texte sur l'orange (côté Steph) */
+
+  /* --- Boutons pastille (blanc au repos, bleu au survol) --- */
+  --btn-fond: #FFFFFF;
+  --btn-texte: #0A0A0C;
+
+  /* --- Macaron rond de la marque --- */
+  --mark-bord: #FFFFFF;
+  --mark-fond: #000000;
+  --mark-texte: #FFFFFF;
+
+  /* --- Voiles et ombres --- */
+  --voile: rgba(4, 4, 6, .78);      /* derrière les fenêtres modales */
+  --ombre: 0 8px 30px rgba(0, 0, 0, .5);
+
+  /* --- Formes --- */
+  --radius: 14px;
+  --radius-sm: 10px;
+
+  /* --- Typographie --- */
+  --font-display: 'Archivo', system-ui, sans-serif;   /* titres et gros chiffres */
+  --font-body: 'Inter', system-ui, sans-serif;        /* texte courant */
+  --font-mono: 'IBM Plex Mono', ui-monospace, monospace; /* montants et étiquettes */
+
+  /* --- Nom de repli si les Réglages ne sont pas encore remplis --- */
+  --brand-fallback: 'Hybrid Coaching';
+}

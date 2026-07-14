@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#070708">
+<title>Hybrid Coaching — Cockpit financier</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800;900&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="theme.css">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<!-- ================= ÉCRAN 1 — CONNEXION ================= -->
+<div id="screen-login" class="screen">
+  <form class="login-card" id="form-login" autocomplete="on">
+    <div class="brand">
+      <div class="brand-mark" id="login-mark">HC</div>
+    </div>
+    <div class="login-title" id="login-title">Hybrid Coaching</div>
+    <div class="login-sub">Cockpit financier — accès réservé aux deux associés</div>
+
+    <div class="form-err" id="login-error" data-testid="login-error" hidden></div>
+
+    <label class="field">
+      <span>Courriel</span>
+      <input type="email" id="login-email" data-testid="login-email" autocomplete="username" required>
+    </label>
+    <label class="field">
+      <span>Mot de passe</span>
+      <input type="password" id="login-password" data-testid="login-password" autocomplete="current-password" required>
+    </label>
+    <button type="submit" class="btn wide" id="login-submit" data-testid="login-submit">Se connecter</button>
+
+    <div class="demo-note" id="login-demo-note" hidden>
+      <b>MODE DÉMO</b> — config.js n'est pas encore rempli.<br>
+      N'importe quel courriel et mot de passe fonctionnent. Les données sont fictives.
+    </div>
+  </form>
+</div>
+
+<!-- ================= ÉCRAN 2 — DIAGNOSTIC ================= -->
+<div id="screen-diag" class="screen">
+  <div class="wrap">
+    <div class="diag-card">
+      <h2>L'application n'arrive pas à se brancher</h2>
+      <p>Voici exactement ce qui manque, et l'étape du guide qui le règle. Le fichier à ouvrir s'appelle <b>GUIDE-INSTALLATION.md</b>.</p>
+      <div id="diag-list" data-testid="diag-list"></div>
+      <div class="tech" id="diag-tech"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= ÉCRAN 3 — APPLICATION ================= -->
+<div id="screen-app" class="screen">
+
+  <header>
+    <div class="wrap header-inner">
+      <div class="brand">
+        <div class="brand-mark" id="brand-mark">HC</div>
+        <h1 id="brand-name">Hybrid Coaching <span>/ Finances</span></h1>
+      </div>
+      <div class="header-right">
+        <span class="badge-demo" id="badge-demo" data-testid="badge-demo"
+              title="Données fictives. Rien n'est sauvegardé : recharger la page remet la démo à zéro." hidden>Mode démo</span>
+        <span class="who" id="who" data-testid="who"></span>
+        <button class="btn-ghost" id="btn-logout" data-testid="btn-logout">Se déconnecter</button>
+      </div>
+    </div>
+    <div class="wrap">
+      <nav class="tabs" id="tabs">
+        <button data-vue="dashboard" class="active" data-testid="tab-dashboard">Tableau de bord</button>
+        <button data-vue="clients" data-testid="tab-clients">Clients &amp; ventes</button>
+        <button data-vue="depenses" data-testid="tab-depenses">Dépenses</button>
+        <button data-vue="reglages" data-testid="tab-reglages">Réglages</button>
+      </nav>
+    </div>
+  </header>
+
+  <div class="wrap">
+
+    <!-- Sélecteur de mois -->
+    <div style="display:flex;justify-content:flex-end;padding:18px 0 0">
+      <div class="month-picker" id="month-picker" data-testid="month-picker"></div>
+    </div>
+
+    <!-- ---------- VUE TABLEAU DE BORD ---------- -->
+    <div id="vue-dashboard">
+
+      <div class="hero">
+        <div class="hero-grid">
+          <div>
+            <div class="eyebrow" id="hero-eyebrow">Profit net</div>
+            <div class="profit-big" id="profit-big" data-testid="profit-big">—</div>
+            <div class="profit-sub" id="profit-sub"></div>
+          </div>
+          <div class="split-card">
+            <div class="eyebrow" id="split-eyebrow">Répartition du profit</div>
+            <div class="split-bar" id="split-bar" data-testid="split-bar">
+              <div class="side steph" id="side-a" style="width:50%"></div>
+              <div class="side alex" id="side-b" style="width:50%"></div>
+            </div>
+            <div class="split-legend">
+              <span>Versé le 1<sup>er</sup> du mois suivant</span>
+              <span id="split-ytd"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="kpis">
+        <div class="kpi rev">
+          <div class="eyebrow">Revenus du mois</div>
+          <div class="val" id="kpi-rev" data-testid="kpi-rev">—</div>
+          <div class="delta" id="kpi-rev-delta"></div>
+        </div>
+        <div class="kpi dep">
+          <div class="eyebrow">Dépenses totales</div>
+          <div class="val" id="kpi-dep" data-testid="kpi-dep">—</div>
+          <div class="delta" id="kpi-dep-delta"></div>
+        </div>
+        <div class="kpi ads">
+          <div class="eyebrow">Dépenses ads</div>
+          <div class="val" id="kpi-ads" data-testid="kpi-ads">—</div>
+          <div class="delta warn" id="kpi-ads-delta"></div>
+        </div>
+        <div class="kpi roas">
+          <div class="eyebrow">ROAS (retour sur ads)</div>
+          <div class="val" id="kpi-roas" data-testid="kpi-roas">—</div>
+          <div class="delta" id="kpi-roas-delta"></div>
+        </div>
+      </div>
+
+      <section>
+        <div class="two-col">
+          <div>
+            <div class="sec-head">
+              <h2>Revenus — Clients</h2><div class="rule"></div>
+              <span class="hint" id="rev-hint"></span>
+            </div>
+            <div class="card">
+              <div class="table-scroll">
+                <table>
+                  <thead>
+                    <tr><th>Client</th><th class="col-plan">Plan</th><th class="right">Montant</th><th>Paiement</th></tr>
+                  </thead>
+                  <tbody id="rev-body" data-testid="rev-body"></tbody>
+                  <tfoot id="rev-foot"></tfoot>
+                </table>
+              </div>
+              <button class="add-row" id="btn-add-client" data-testid="btn-add-client">+ Ajouter un client / une vente</button>
+            </div>
+          </div>
+
+          <div>
+            <div class="sec-head">
+              <h2>Ads — Simulateur</h2><div class="rule"></div>
+            </div>
+            <div class="card">
+              <div class="ads-input">
+                <label for="sim-slider">Budget ads journalier</label>
+                <input type="range" id="sim-slider" data-testid="sim-slider" min="0" max="500" step="5" value="120">
+                <span class="out" id="sim-out" data-testid="sim-out">—</span>
+              </div>
+              <div class="ads-summary">
+                <div class="mini">
+                  <div class="lab">Ads / mois projeté</div>
+                  <div class="num t-orange" id="sim-ads" data-testid="sim-ads">—</div>
+                </div>
+                <div class="mini">
+                  <div class="lab">Profit projeté</div>
+                  <div class="num t-teal" id="sim-profit" data-testid="sim-profit">—</div>
+                </div>
+                <div class="mini">
+                  <div class="lab">Coût d'acquisition / client</div>
+                  <div class="num" id="sim-cpa" data-testid="sim-cpa">—</div>
+                </div>
+                <div class="mini">
+                  <div class="lab">Seuil rentabilité / jour</div>
+                  <div class="num t-gold" id="sim-seuil" data-testid="sim-seuil">—</div>
+                </div>
+              </div>
+              <div class="sim-split">
+                <span class="a">Part <span id="sim-name-a">Steph</span> : <b id="sim-part-a" data-testid="sim-part-a">—</b></span>
+                <span class="b">Part <span id="sim-name-b">Alex</span> : <b id="sim-part-b" data-testid="sim-part-b">—</b></span>
+              </div>
+            </div>
+
+            <div class="sec-head" style="margin-top:22px">
+              <h2>Autres dépenses</h2><div class="rule"></div>
+            </div>
+            <div class="card">
+              <div class="table-scroll">
+                <table><tbody id="autres-body" data-testid="autres-body"></tbody></table>
+              </div>
+              <button class="add-row" id="btn-add-depense" data-testid="btn-add-depense">+ Ajouter une dépense</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div class="sec-head">
+          <h2>Évolution</h2><div class="rule"></div>
+          <div class="chart-toggle">
+            <button id="chart-6" class="active" data-testid="chart-6">6 mois</button>
+            <button id="chart-12" data-testid="chart-12">12 mois</button>
+          </div>
+        </div>
+        <div class="card">
+          <div class="chart" id="chart" data-testid="chart"></div>
+          <div class="legend">
+            <span><span class="dot r"></span>Revenus</span>
+            <span><span class="dot d"></span>Dépenses</span>
+            <span><span class="dot p"></span>Profit</span>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div class="sec-head">
+          <h2>Signaux business</h2><div class="rule"></div>
+          <span class="hint">Ce que les chiffres te disent ce mois-ci</span>
+        </div>
+        <div class="signals" id="signals" data-testid="signals"></div>
+      </section>
+
+      <section>
+        <div class="sec-head">
+          <h2>Export</h2><div class="rule"></div>
+          <span class="hint">Fichiers CSV, ouvrables dans Excel</span>
+        </div>
+        <div class="card">
+          <div class="actions-row">
+            <button class="btn" id="btn-export-mois" data-testid="btn-export-mois">Exporter le mois affiché</button>
+            <button class="btn" id="btn-export-annee" data-testid="btn-export-annee">Exporter toute l'année</button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ---------- VUE CLIENTS ---------- -->
+    <div id="vue-clients" hidden>
+      <section>
+        <div class="sec-head">
+          <h2>Clients &amp; ventes</h2><div class="rule"></div>
+          <span class="hint" id="clients-hint"></span>
+        </div>
+        <div class="card">
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Client</th><th>Vente</th><th class="right">Montant</th>
+                  <th>Début</th><th>Ajouté par</th><th class="right">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="clients-body" data-testid="clients-body"></tbody>
+            </table>
+          </div>
+          <button class="add-row" id="btn-add-client-2" data-testid="btn-add-client-2">+ Ajouter un client / une vente</button>
+        </div>
+      </section>
+
+      <section>
+        <div class="sec-head">
+          <h2>Paiements du mois</h2><div class="rule"></div>
+          <span class="hint">Un clic sur la pastille change le statut</span>
+        </div>
+        <div class="card">
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr><th>Échéance</th><th>Client</th><th>Plan</th><th class="right">Montant</th><th>Statut</th></tr>
+              </thead>
+              <tbody id="paiements-body" data-testid="paiements-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ---------- VUE DÉPENSES ---------- -->
+    <div id="vue-depenses" hidden>
+      <section>
+        <div class="sec-head">
+          <h2>Ads journaliers</h2><div class="rule"></div>
+          <span class="hint" id="ads-hint"></span>
+        </div>
+        <div class="card">
+          <form class="form-row" id="form-ads" style="align-items:end">
+            <label class="field" style="margin:0">
+              <span>Jour</span>
+              <input type="date" id="ads-day" data-testid="ads-day" required>
+            </label>
+            <label class="field" style="margin:0">
+              <span>Montant dépensé ($)</span>
+              <input type="number" id="ads-amount" data-testid="ads-amount" min="0" step="0.01" required>
+            </label>
+            <button type="submit" class="btn" data-testid="btn-ads-save" style="grid-column:1/-1">Enregistrer la dépense du jour</button>
+          </form>
+          <div class="table-scroll" style="margin-top:18px">
+            <table>
+              <thead><tr><th>Jour</th><th class="right">Montant</th><th>Ajouté par</th><th class="right">Actions</th></tr></thead>
+              <tbody id="ads-body" data-testid="ads-body"></tbody>
+              <tfoot id="ads-foot"></tfoot>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <div class="grid-2">
+        <section>
+          <div class="sec-head"><h2>Récurrentes</h2><div class="rule"></div></div>
+          <div class="card">
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>Dépense</th><th class="right">Par mois</th><th>État</th><th class="right">Actions</th></tr></thead>
+                <tbody id="recur-body" data-testid="recur-body"></tbody>
+              </table>
+            </div>
+            <button class="add-row" id="btn-add-recur" data-testid="btn-add-recur">+ Ajouter une dépense récurrente</button>
+          </div>
+        </section>
+
+        <section>
+          <div class="sec-head"><h2>Ponctuelles</h2><div class="rule"></div></div>
+          <div class="card">
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>Date</th><th>Dépense</th><th class="right">Montant</th><th class="right">Actions</th></tr></thead>
+                <tbody id="ponct-body" data-testid="ponct-body"></tbody>
+              </table>
+            </div>
+            <button class="add-row" id="btn-add-ponct" data-testid="btn-add-ponct">+ Ajouter une dépense ponctuelle</button>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <!-- ---------- VUE RÉGLAGES ---------- -->
+    <div id="vue-reglages" hidden>
+      <section>
+        <div class="sec-head"><h2>Réglages</h2><div class="rule"></div></div>
+        <div class="grid-2">
+          <div class="card">
+            <form id="form-reglages">
+              <div class="form-err" id="reglages-err" data-testid="reglages-err" hidden></div>
+
+              <label class="field">
+                <span>Nom de l'entreprise</span>
+                <input type="text" id="set-business" data-testid="set-business" required>
+                <span class="aide">Les initiales du macaron rond en découlent automatiquement.</span>
+              </label>
+
+              <div class="form-row">
+                <label class="field">
+                  <span>Associé A (orange)</span>
+                  <input type="text" id="set-name-a" data-testid="set-name-a" required>
+                </label>
+                <label class="field">
+                  <span>Associé B (bleu)</span>
+                  <input type="text" id="set-name-b" data-testid="set-name-b" required>
+                </label>
+              </div>
+
+              <div class="form-row">
+                <label class="field">
+                  <span>Courriel de l'associé A</span>
+                  <input type="email" id="set-email-a" data-testid="set-email-a">
+                </label>
+                <label class="field">
+                  <span>Courriel de l'associé B</span>
+                  <input type="email" id="set-email-b" data-testid="set-email-b">
+                </label>
+              </div>
+              <span class="aide" style="display:block;margin:-8px 0 16px;color:var(--muted);font-size:12px">
+                Ces deux courriels servent à afficher « Ajouté par Alex » au lieu de l'adresse complète.
+                Utilise exactement les courriels créés dans Supabase.
+              </span>
+
+              <div class="form-row">
+                <label class="field">
+                  <span>Part de <span id="lab-split-a">Steph</span> (%)</span>
+                  <input type="number" id="set-split" data-testid="set-split" min="0" max="100" step="0.5" required>
+                </label>
+                <label class="field">
+                  <span>Budget ads journalier par défaut ($)</span>
+                  <input type="number" id="set-budget" data-testid="set-budget" min="0" step="1" required>
+                </label>
+              </div>
+
+              <div class="split-preview" id="split-preview" data-testid="split-preview">
+                <div class="side steph" id="prev-a" style="width:50%">50 %</div>
+                <div class="side alex" id="prev-b" style="width:50%">50 %</div>
+              </div>
+              <span class="aide" style="display:block;margin-top:8px;color:var(--muted);font-size:12px">
+                La part de l'associé B est calculée automatiquement : les deux parts totalisent toujours 100 %.
+              </span>
+
+              <button type="submit" class="btn wide" style="margin-top:20px" data-testid="btn-save-settings">Enregistrer les réglages</button>
+            </form>
+          </div>
+
+          <div class="card">
+            <div class="eyebrow">Où vont mes données ?</div>
+            <p id="reglages-info" style="color:var(--muted);font-size:14px;margin-top:12px"></p>
+            <div class="eyebrow" style="margin-top:22px">Export</div>
+            <div class="actions-row" style="margin-top:12px">
+              <button type="button" class="btn" id="btn-export-mois-2" data-testid="btn-export-mois-2">Exporter le mois affiché</button>
+              <button type="button" class="btn" id="btn-export-annee-2" data-testid="btn-export-annee-2">Exporter toute l'année</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <footer id="footer"></footer>
+  </div>
+</div>
+
+<div id="modal-root"></div>
+<div id="toast-root"></div>
+
+<!-- supabase-js : utilisé uniquement quand config.js est rempli -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.47.10/dist/umd/supabase.js"></script>
+
+<script src="config.js"></script>
+<script src="js/format.js"></script>
+<script src="js/calc.js"></script>
+<script src="js/demo-data.js"></script>
+<script src="js/backend-demo.js"></script>
+<script src="js/backend-supabase.js"></script>
+<script src="js/data.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
