@@ -1,0 +1,181 @@
+# Hybrid Finance — sauvegarde des données + réveil du projet Supabase gratuit.
+#
+# Deux rôles dans un seul robot, une fois par jour :
+#   1) Un ping (lecture) qui garde le projet Supabase gratuit éveillé — le plan
+#      gratuit met le projet en pause après environ une semaine sans activité.
+#   2) Une fois par semaine (le lundi), une copie complète des 8 tables en CSV,
+#      rangée dans un dossier daté AAAA-MM-JJ. On ne garde que les 12 copies
+#      les plus récentes.
+#
+# OÙ VONT LES COPIES — et pourquoi ce n'est plus ici.
+# Le dépôt de l'application est PUBLIC : c'est ce qu'exige l'hébergement gratuit
+# GitHub Pages. Tout fichier déposé ici est donc lisible par n'importe qui sur
+# Internet. Les CSV contiennent les noms des clients et tous les montants : ils
+# partent maintenant dans un dépôt GitHub PRIVÉ séparé (secret HF_BACKUP_REPO),
+# cloné dans un dossier temporaire du serveur d'exécution, jamais dans l'espace
+# de travail de l'application. Voir la section « Pourquoi les sauvegardes
+# changent de destination » du GUIDE-SAUVEGARDE.md.
+#
+# Le robot se connecte à Supabase avec un COMPTE DE SERVICE dédié (voir la
+# section « Créer le compte de service dans Supabase » du GUIDE-SAUVEGARDE.md) :
+# la clé publiable seule ne peut rien lire (Row Level Security), donc plutôt que
+# d'exposer une clé secrète qui donnerait un accès total, on crée un troisième
+# utilisateur avec les mêmes droits que Steph et Alex.
+#
+# Secrets utilisés : SUPABASE_URL, SUPABASE_KEY, HF_BACKUP_EMAIL,
+# HF_BACKUP_PASSWORD, HF_BACKUP_REPO, HF_BACKUP_TOKEN.
+# Un secret non créé vaut la chaîne vide : sans HF_BACKUP_REPO ni
+# HF_BACKUP_TOKEN, le robot fait le réveil quotidien et s'arrête là, en succès.
+name: Sauvegarde et maintien en éveil
+
+on:
+  schedule:
+    # Tous les jours à 10h23 UTC (heure calme, hors des heures de bureau au Québec).
+    - cron: '23 10 * * *'
+  workflow_dispatch: {}   # bouton « Run workflow » dans l'onglet Actions, pour tester tout de suite
+
+# Lecture seule sur le dépôt de l'application : le robot n'y écrit PLUS RIEN.
+# Les copies partent dans le dépôt privé, avec son propre jeton (secret
+# HF_BACKUP_TOKEN) — le jeton automatique de ce workflow n'a donc plus aucun
+# besoin du droit d'écriture, et ne l'a plus.
+permissions:
+  contents: read
+
+jobs:
+  sauvegarde:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Récupérer le dépôt de l'application
+        uses: actions/checkout@v4
+
+      # LE RÉVEIL D'ABORD, TOUJOURS, ET QUOI QU'IL ARRIVE ENSUITE.
+      # C'est le rôle vital du robot : sans lecture régulière, le plan gratuit de
+      # Supabase met le projet en pause au bout d'une semaine et l'application
+      # devient inaccessible. Il ne doit donc dépendre de RIEN — ni des secrets de
+      # sauvegarde, ni d'un jeton expiré, ni d'un dossier backups oublié. Pas de
+      # BACKUP_DIR ici : le script se contente du réveil.
+      - name: Réveiller la base de données
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          HF_BACKUP_EMAIL: ${{ secrets.HF_BACKUP_EMAIL }}
+          HF_BACKUP_PASSWORD: ${{ secrets.HF_BACKUP_PASSWORD }}
+        run: node .github/scripts/sauvegarde.js
+
+      # Garde-fou contre l'ancienne erreur : avant, les CSV étaient déposés dans
+      # un dossier backups/ de CE dépôt, qui est public. Si un tel dossier existe
+      # encore, on arrête tout et on le dit très fort — mais APRÈS le réveil
+      # ci-dessus, pour qu'un ménage en retard ne fasse jamais dormir la base.
+      - name: Vérifier qu'aucun dossier backups n'est resté dans le dépôt public
+        run: |
+          if [ -d backups ]; then
+            echo "ÉCHEC — un dossier « backups » est présent dans le dépôt de l'application."
+            echo "Ce dépôt est PUBLIC (l'hébergement gratuit GitHub Pages l'exige) : des copies de la"
+            echo "base de données déposées là sont lisibles par n'importe qui sur Internet."
+            echo "Supprime ce dossier du dépôt, puis considère les données qu'il contenait comme ayant"
+            echo "été publiques. Marche à suivre dans le GUIDE-SAUVEGARDE.md, section :"
+            echo "« Pourquoi les sauvegardes changent de destination »"
+            exit 1
+          fi
+          echo "Aucun dossier backups dans le dépôt de l'application : parfait."
+
+      # Un secret jamais créé vaut la chaîne vide — c'est ainsi qu'on sait si la
+      # sauvegarde vers le dépôt privé est configurée ou non.
+      - name: Regarder si le dépôt privé de sauvegarde est configuré
+        id: config
+        env:
+          HF_BACKUP_REPO: ${{ secrets.HF_BACKUP_REPO }}
+          HF_BACKUP_TOKEN: ${{ secrets.HF_BACKUP_TOKEN }}
+        run: |
+          # Un espace invisible collé au bout d'un secret est l'erreur la plus
+          # classique : on nettoie avant de décider quoi que ce soit.
+          depot="$(printf '%s' "$HF_BACKUP_REPO" | tr -d '[:space:]')"
+          jeton="$(printf '%s' "$HF_BACKUP_TOKEN" | tr -d '[:space:]')"
+          if [ -z "$depot" ] || [ -z "$jeton" ]; then
+            echo "configure=non" >> "$GITHUB_OUTPUT"
+            echo "Secrets HF_BACKUP_REPO / HF_BACKUP_TOKEN absents : aujourd'hui, réveil seulement."
+          else
+            echo "configure=oui" >> "$GITHUB_OUTPUT"
+            echo "Dépôt privé de sauvegarde configuré."
+          fi
+
+      # La base est déjà réveillée à ce stade. Tout ce qui suit ne concerne que la
+      # COPIE des données, et n'a lieu que si le dépôt privé est configuré.
+      # Refus IMMÉDIAT, avant tout clone et toute écriture, si la destination est
+      # le dépôt de l'application lui-même.
+      - name: Refuser d'envoyer les sauvegardes dans le dépôt public de l'application
+        if: steps.config.outputs.configure == 'oui'
+        env:
+          HF_BACKUP_REPO: ${{ secrets.HF_BACKUP_REPO }}
+          DEPOT_APPLICATION: ${{ github.repository }}
+        run: |
+          # Comparaison robuste : espaces retirés et tout en minuscules, parce
+          # qu'un nom de dépôt GitHub ne distingue pas les majuscules —
+          # « Steph/Hybrid-Finance » et « steph/hybrid-finance » sont le MÊME
+          # dépôt, et le garde-fou ne doit pas se laisser contourner par une
+          # majuscule ou un espace en trop.
+          depot="$(printf '%s' "$HF_BACKUP_REPO" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+          application="$(printf '%s' "$DEPOT_APPLICATION" | tr '[:upper:]' '[:lower:]')"
+          if [ "$depot" = "$application" ]; then
+            echo "ÉCHEC — le secret HF_BACKUP_REPO désigne le dépôt de l'application ($DEPOT_APPLICATION)."
+            echo "Ce dépôt est PUBLIC : y envoyer les copies de la base de données rendrait les noms des"
+            echo "clients et tous les montants visibles par n'importe qui. Le robot refuse."
+            echo "Crée un dépôt SÉPARÉ et PRIVÉ, puis corrige le secret HF_BACKUP_REPO — sections"
+            echo "« Créer le dépôt privé de sauvegarde » et « Ajouter les secrets dans GitHub » du"
+            echo "GUIDE-SAUVEGARDE.md."
+            exit 1
+          fi
+          echo "Destination des sauvegardes : $depot (bien différent du dépôt de l'application)."
+
+      # Le clone vit dans RUNNER_TEMP, jamais dans l'espace de travail : ainsi
+      # aucun fichier de sauvegarde ne peut se retrouver dans le dépôt public,
+      # même par accident.
+      #
+      # Le dépôt privé est censé contenir AU MOINS UN fichier (le README que le
+      # guide fait cocher à sa création — section « Créer le dépôt privé de
+      # sauvegarde »). Un dépôt totalement vide se clone quand même, mais git
+      # affiche alors « You appear to have cloned an empty repository » et le
+      # nom de la branche locale dépend de la configuration du serveur plutôt
+      # que de celle de GitHub : les copies partiraient sur une branche au nom
+      # inattendu. Le README évite cette confusion — d'où la consigne du guide.
+      - name: Cloner le dépôt privé de sauvegarde
+        if: steps.config.outputs.configure == 'oui'
+        env:
+          HF_BACKUP_REPO: ${{ secrets.HF_BACKUP_REPO }}
+          HF_BACKUP_TOKEN: ${{ secrets.HF_BACKUP_TOKEN }}
+        run: |
+          depot="$(printf '%s' "$HF_BACKUP_REPO" | tr -d '[:space:]')"
+          jeton="$(printf '%s' "$HF_BACKUP_TOKEN" | tr -d '[:space:]')"
+          git clone --depth 1 \
+            "https://x-access-token:$jeton@github.com/$depot.git" \
+            "$RUNNER_TEMP/depot-sauvegardes"
+          echo "Dépôt privé cloné dans un dossier temporaire du serveur."
+
+      - name: Exécuter le script de sauvegarde
+        if: steps.config.outputs.configure == 'oui'
+        # Un déclenchement manuel (workflow_dispatch) force toujours une sauvegarde
+        # complète, même si ce n'est pas lundi : c'est ce qui permet de tester
+        # immédiatement après l'installation.
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          HF_BACKUP_EMAIL: ${{ secrets.HF_BACKUP_EMAIL }}
+          HF_BACKUP_PASSWORD: ${{ secrets.HF_BACKUP_PASSWORD }}
+          FORCE_BACKUP: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}
+          BACKUP_DIR: ${{ runner.temp }}/depot-sauvegardes/backups
+        run: node .github/scripts/sauvegarde.js
+
+      - name: Déposer les copies dans le dépôt privé
+        if: steps.config.outputs.configure == 'oui'
+        working-directory: ${{ runner.temp }}/depot-sauvegardes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Rien de nouveau à sauvegarder aujourd'hui (jour de ping seulement)."
+          else
+            git commit -m "Sauvegarde du $(date -u +%Y-%m-%d)"
+            git push origin HEAD
+            echo "Copies envoyées dans le dépôt privé de sauvegarde."
+          fi
