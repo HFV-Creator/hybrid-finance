@@ -102,6 +102,7 @@
         if (exist) {
           exist.amount = row.amount;
           exist.created_by = row.created_by;
+          if ('deleted_at' in row) exist.deleted_at = row.deleted_at;
           return Promise.resolve(copie(exist));
         }
         return this.insert('ad_spend', row);
@@ -109,8 +110,28 @@
 
       saveSettings: function (patch) {
         amorcer();
-        Object.assign(db.settings, patch);
-        return Promise.resolve(copie(db.settings));
+        /* copie profonde dans les deux sens : monthly_goal_overrides est un objet,
+           et un objet partagé entre le backend et la couche de données recréerait
+           le bug des doubles écritures. */
+        Object.assign(db.settings, copieProfonde(patch));
+        return Promise.resolve(copieProfonde(db.settings));
+      },
+
+      /* En mode démo, changer le mot de passe fait semblant de réussir :
+         il n'y a pas de vrai compte. Les mêmes règles de validation que le
+         vrai backend s'appliquent, pour que l'écran se comporte pareil. */
+      changePassword: function (email, actuel, nouveau) {
+        if (!actuel) {
+          var e1 = new Error('mot de passe actuel manquant');
+          e1.code = 'mauvais_mdp';
+          return Promise.reject(e1);
+        }
+        if (!nouveau || nouveau.length < 6) {
+          var e2 = new Error('mot de passe trop court');
+          e2.code = 'mdp_faible';
+          return Promise.reject(e2);
+        }
+        return Promise.resolve(true);
       }
     };
   }

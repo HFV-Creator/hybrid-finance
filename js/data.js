@@ -150,12 +150,28 @@
     return email;
   }
 
+  var TABLES_DONNEES = ['clients', 'sales', 'payments', 'ad_spend', 'recurring_expenses', 'one_off_expenses'];
+
+  /* La vue que consulte l'interface : les lignes supprimées (deleted_at posé)
+     n'existent plus pour aucun écran ni aucun calcul. etat.db, lui, garde TOUT :
+     c'est ce qui permet la Corbeille, et c'est ce qui évite de recréer un
+     paiement d'abonnement par-dessus une ligne supprimée (la contrainte
+     unique (sale_id, due_date) vaut aussi pour les lignes supprimées). */
+  function vueVivante() {
+    if (!etat.db) return etat.db;
+    var out = { settings: etat.db.settings };
+    TABLES_DONNEES.forEach(function (t) {
+      out[t] = (etat.db[t] || []).filter(function (r) { return !r.deleted_at; });
+    });
+    return out;
+  }
+
   /* Charge toute la base et complète les échéanciers d'abonnement. */
   async function load() {
     etat.db = await etat.backend.fetchAll();
-    ['clients', 'sales', 'payments', 'ad_spend', 'recurring_expenses', 'one_off_expenses']
-      .forEach(function (t) { if (!etat.db[t]) etat.db[t] = []; });
+    TABLES_DONNEES.forEach(function (t) { if (!etat.db[t]) etat.db[t] = []; });
     if (!etat.db.settings) etat.db.settings = { split_a_pct: 50, daily_ad_budget: 120 };
+    if (!etat.db.settings.monthly_goal_overrides) etat.db.settings.monthly_goal_overrides = {};
     await ensurePayments(C.addMonths(C.monthKey(C.todayISO()), 3));
     return etat.db;
   }
@@ -164,8 +180,10 @@
   async function ensurePayments(horizonMonth) {
     var db = etat.db;
     var aCreer = [];
-    db.sales.filter(function (s) { return s.type === 'abonnement' && !s.archived; })
+    db.sales.filter(function (s) { return s.type === 'abonnement' && !s.archived && !s.deleted_at; })
       .forEach(function (s) {
+        // la carte des échéances existantes DOIT inclure les paiements supprimés :
+        // la base refuse deux paiements de la même vente à la même date, supprimé ou non.
         var existants = {};
         db.payments.forEach(function (p) { if (p.sale_id === s.id) existants[p.due_date] = true; });
         C.generatePayments(s, horizonMonth).forEach(function (p) {
@@ -204,11 +222,15 @@
   async function archiveClient(id) {
     await updateClient(id, { archived: true });
     // les ventes du client sont archivées avec lui, et leurs paiements futurs non payés disparaissent
-    var ventes = etat.db.sales.filter(function (s) { return s.client_id === id && !s.archived; });
+    var ventes = etat.db.sales.filter(function (s) { return s.client_id === id && !s.archived && !s.deleted_at; });
     for (var i = 0; i < ventes.length; i++) await archiveSale(ventes[i].id);
   }
 
-  async function addSale(data) {
+  /* retro : que faire des échéances déjà passées d'une vente rétroactive ?
+     { statutPasses: 'paid' } → créées déjà payées, à leur date d'échéance ;
+     { statutPasses: 'pending' } (ou rien) → créées « à vérifier », elles
+     apparaîtront dans l'écran À TRAITER. */
+  async function addSale(data, retro) {
     var row = await etat.backend.insert('sales', {
       client_id: data.client_id,
       type: data.type,
@@ -223,11 +245,17 @@
     });
     etat.db.sales.push(row);
 
-    var horizon = C.addMonths(C.monthKey(C.todayISO()), 3);
+    var today = C.todayISO();
+    var passeEstPaye = !!(retro && retro.statutPasses === 'paid');
+    var horizon = C.addMonths(C.monthKey(today), 3);
     var lignes = C.generatePayments(row, horizon).map(function (p) {
+      var passe = C.compareDates(p.due_date, today) < 0;
       return {
         sale_id: row.id, client_id: row.client_id, due_date: p.due_date,
-        amount: p.amount, status: 'pending', paid_date: null, created_by: courriel()
+        amount: p.amount,
+        status: (passe && passeEstPaye) ? 'paid' : 'pending',
+        paid_date: (passe && passeEstPaye) ? p.due_date : null,
+        created_by: courriel()
       };
     });
     var crees = await etat.backend.insertMany('payments', lignes);
@@ -235,43 +263,183 @@
     return row;
   }
 
-  /* Archiver une vente : on la retire de la vue et on supprime ses paiements
-     non payés à venir. L'historique déjà encaissé est conservé. */
+  /* Archiver une vente : on la retire de la vue et ses paiements non payés à
+     venir partent à la Corbeille (rien n'est effacé pour de bon). L'historique
+     déjà encaissé est conservé. */
   async function archiveSale(id) {
     var today = C.todayISO();
     await etat.backend.update('sales', id, { archived: true });
     var vente = etat.db.sales.find(function (s) { return s.id === id; });
     if (vente) vente.archived = true;
 
-    var aSupprimer = etat.db.payments.filter(function (p) {
-      return p.sale_id === id && p.status !== 'paid' && C.compareDates(p.due_date, today) > 0;
+    var futurs = etat.db.payments.filter(function (p) {
+      return p.sale_id === id && !p.deleted_at &&
+        p.status !== 'paid' && C.compareDates(p.due_date, today) > 0;
     });
-    for (var i = 0; i < aSupprimer.length; i++) {
-      await etat.backend.remove('payments', aSupprimer[i].id);
+    var quand = new Date().toISOString();
+    for (var i = 0; i < futurs.length; i++) {
+      await marquerSupprime('payments', futurs[i].id, quand);
     }
-    var ids = {};
-    aSupprimer.forEach(function (p) { ids[p.id] = true; });
-    etat.db.payments = etat.db.payments.filter(function (p) { return !ids[p.id]; });
   }
 
-  /* Bascule payé / en attente en un clic. */
-  async function togglePayment(id) {
+  /* Fixe le statut d'un paiement. Marquer « payé » remplit la date réelle
+     d'encaissement avec aujourd'hui (modifiable ensuite en place). */
+  async function setPaymentStatus(id, statut) {
     var p = etat.db.payments.find(function (x) { return x.id === id; });
     if (!p) return null;
-    var paye = p.status === 'paid';
-    var patch = paye
-      ? { status: 'pending', paid_date: null }
-      : { status: 'paid', paid_date: C.todayISO() };
+    var patch = (statut === 'paid')
+      ? { status: 'paid', paid_date: p.paid_date || C.todayISO() }
+      : { status: statut, paid_date: null };   // 'pending' ou 'saute'
     var row = await etat.backend.update('payments', id, patch);
     Object.assign(p, row || patch);
     return p;
   }
 
+  /* Un clic sur une pastille fait tourner le statut :
+     en attente / en retard → payé → sauté → en attente. */
+  async function cyclePayment(id) {
+    var p = etat.db.payments.find(function (x) { return x.id === id; });
+    if (!p) return null;
+    var suivant = p.status === 'paid' ? 'saute' : (p.status === 'saute' ? 'pending' : 'paid');
+    return setPaymentStatus(id, suivant);
+  }
+
+  /* « Relancer » : on note simplement la date de la relance. Aucun courriel
+     n'est envoyé — c'est un aide-mémoire (« relancé il y a 3 jours »). */
+  async function relancer(id) {
+    var p = etat.db.payments.find(function (x) { return x.id === id; });
+    if (!p) return null;
+    var patch = { reminded_date: C.todayISO() };
+    var row = await etat.backend.update('payments', id, patch);
+    Object.assign(p, row || patch);
+    return p;
+  }
+
+  /* Modification en place d'un paiement (échéance ou date d'encaissement). */
+  async function updatePayment(id, patch) {
+    var p = etat.db.payments.find(function (x) { return x.id === id; });
+    if (!p) return null;
+    var row = await etat.backend.update('payments', id, patch);
+    Object.assign(p, row || patch);
+    return p;
+  }
+
+  /* ---------- Corbeille : rien n'est jamais effacé pour de bon ----------
+     Supprimer = poser deleted_at (un horodatage). La ligne disparaît de tous
+     les écrans et de tous les calculs, mais reste restaurable 30 jours depuis
+     la Corbeille des Réglages. Le plan gratuit de Supabase n'a aucune
+     sauvegarde : cette corbeille est le seul filet contre la fausse manœuvre. */
+
+  async function marquerSupprime(table, id, quand) {
+    var row = await etat.backend.update(table, id, { deleted_at: quand });
+    var ligne = etat.db[table].find(function (r) { return r.id === id; });
+    if (ligne) Object.assign(ligne, row || { deleted_at: quand });
+  }
+
+  /* Supprime (doucement) une ligne. Un client emporte ses ventes et leurs
+     paiements ; une vente emporte ses paiements — tous marqués du MÊME
+     horodatage, ce qui permet à la restauration de ramener le groupe entier. */
+  async function supprimer(table, id) {
+    var quand = new Date().toISOString();
+    if (table === 'clients') {
+      await marquerSupprime('clients', id, quand);
+      var ventes = etat.db.sales.filter(function (s) { return s.client_id === id && !s.deleted_at; });
+      for (var i = 0; i < ventes.length; i++) await supprimerVente(ventes[i].id, quand);
+    } else if (table === 'sales') {
+      await supprimerVente(id, quand);
+    } else {
+      await marquerSupprime(table, id, quand);
+    }
+  }
+
+  async function supprimerVente(saleId, quand) {
+    await marquerSupprime('sales', saleId, quand);
+    var pays = etat.db.payments.filter(function (p) { return p.sale_id === saleId && !p.deleted_at; });
+    for (var i = 0; i < pays.length; i++) await marquerSupprime('payments', pays[i].id, quand);
+  }
+
+  async function ranimer(table, id) {
+    var row = await etat.backend.update(table, id, { deleted_at: null });
+    var ligne = etat.db[table].find(function (r) { return r.id === id; });
+    if (ligne) Object.assign(ligne, row || { deleted_at: null });
+  }
+
+  /* Restaure une ligne, et tout ce qui avait été supprimé avec elle
+     (même horodatage) : la restauration ramène l'état exactement d'avant. */
+  async function restaurer(table, id) {
+    var ligne = etat.db[table].find(function (r) { return r.id === id; });
+    if (!ligne || !ligne.deleted_at) return;
+    var quand = ligne.deleted_at;
+    await ranimer(table, id);
+    var i;
+    if (table === 'clients') {
+      var ventes = etat.db.sales.filter(function (s) { return s.client_id === id && s.deleted_at === quand; });
+      for (i = 0; i < ventes.length; i++) await restaurerVente(ventes[i].id, quand);
+    } else if (table === 'sales') {
+      var pays = etat.db.payments.filter(function (p) { return p.sale_id === id && p.deleted_at === quand; });
+      for (i = 0; i < pays.length; i++) await ranimer('payments', pays[i].id);
+    }
+  }
+
+  async function restaurerVente(saleId, quand) {
+    await ranimer('sales', saleId);
+    var pays = etat.db.payments.filter(function (p) { return p.sale_id === saleId && p.deleted_at === quand; });
+    for (var i = 0; i < pays.length; i++) await ranimer('payments', pays[i].id);
+  }
+
+  /* Le contenu de la Corbeille : ce qui a été supprimé depuis moins de 30 jours.
+     Les lignes emportées par la suppression d'un parent (les paiements d'une
+     vente supprimée, les ventes d'un client supprimé) ne sont pas listées :
+     elles reviendront avec lui. */
+  function corbeille() {
+    var limite = new Date(Date.now() - 30 * 86400000).toISOString();
+    var out = [];
+    var parId = {};
+    ['clients', 'sales'].forEach(function (t) {
+      etat.db[t].forEach(function (r) { parId[r.id] = r; });
+    });
+
+    function garder(table, r) {
+      if (!r.deleted_at || r.deleted_at < limite) return false;
+      if (table === 'sales') {
+        var c = parId[r.client_id];
+        if (c && c.deleted_at === r.deleted_at) return false;   // part avec son client
+      }
+      if (table === 'payments') {
+        var v = parId[r.sale_id];
+        if (v && v.deleted_at === r.deleted_at) return false;   // part avec sa vente
+      }
+      return true;
+    }
+
+    function nomClient(id) {
+      var c = etat.db.clients.find(function (x) { return x.id === id; });
+      return c ? c.name : '(client supprimé)';
+    }
+
+    TABLES_DONNEES.forEach(function (t) {
+      etat.db[t].forEach(function (r) {
+        if (!garder(t, r)) return;
+        var label;
+        if (t === 'clients') label = 'Client — ' + r.name;
+        else if (t === 'sales') label = 'Vente — ' + C.saleLabel(r) + ' (' + nomClient(r.client_id) + ')';
+        else if (t === 'payments') label = 'Paiement du ' + r.due_date + ' — ' + nomClient(r.client_id);
+        else if (t === 'ad_spend') label = 'Ads du ' + r.day;
+        else label = 'Dépense — ' + r.label;
+        out.push({ table: t, row: r, label: label, quand: r.deleted_at });
+      });
+    });
+    out.sort(function (a, b) { return a.quand < b.quand ? 1 : -1; });
+    return out;
+  }
+
   /* ---------- Dépenses ---------- */
 
   async function setAdSpend(day, amount) {
+    // deleted_at: null — si la ligne de ce jour dormait dans la Corbeille,
+    // la ressaisir la fait revivre au lieu de modifier une ligne invisible.
     var row = await etat.backend.upsertAdSpend({
-      day: day, amount: Number(amount), created_by: courriel()
+      day: day, amount: Number(amount), created_by: courriel(), deleted_at: null
     });
     var i = etat.db.ad_spend.findIndex(function (a) { return a.day === day; });
     if (i >= 0) etat.db.ad_spend[i] = row; else etat.db.ad_spend.push(row);
@@ -279,8 +447,7 @@
   }
 
   async function deleteAdSpend(id) {
-    await etat.backend.remove('ad_spend', id);
-    etat.db.ad_spend = etat.db.ad_spend.filter(function (a) { return a.id !== id; });
+    await supprimer('ad_spend', id);
   }
 
   async function addRecurring(data) {
@@ -306,8 +473,7 @@
   }
 
   async function deleteRecurring(id) {
-    await etat.backend.remove('recurring_expenses', id);
-    etat.db.recurring_expenses = etat.db.recurring_expenses.filter(function (r) { return r.id !== id; });
+    await supprimer('recurring_expenses', id);
   }
 
   async function addOneOff(data) {
@@ -319,9 +485,17 @@
     return row;
   }
 
+  /* Modification en place d'une dépense ponctuelle (sa date, notamment). */
+  async function updateOneOff(id, patch) {
+    var e = etat.db.one_off_expenses.find(function (x) { return x.id === id; });
+    if (!e) return null;
+    var row = await etat.backend.update('one_off_expenses', id, patch);
+    Object.assign(e, row || patch);
+    return e;
+  }
+
   async function deleteOneOff(id) {
-    await etat.backend.remove('one_off_expenses', id);
-    etat.db.one_off_expenses = etat.db.one_off_expenses.filter(function (e) { return e.id !== id; });
+    await supprimer('one_off_expenses', id);
   }
 
   /* ---------- Réglages ---------- */
@@ -330,6 +504,12 @@
     var row = await etat.backend.saveSettings(patch);
     Object.assign(etat.db.settings, row || patch);
     return etat.db.settings;
+  }
+
+  /* ---------- Mon compte ---------- */
+
+  async function changePassword(actuel, nouveau) {
+    return etat.backend.changePassword(courriel(), actuel, nouveau);
   }
 
   root.HF = root.HF || {};
@@ -351,7 +531,10 @@
     archiveClient: archiveClient,
     addSale: addSale,
     archiveSale: archiveSale,
-    togglePayment: togglePayment,
+    setPaymentStatus: setPaymentStatus,
+    cyclePayment: cyclePayment,
+    relancer: relancer,
+    updatePayment: updatePayment,
     setAdSpend: setAdSpend,
     deleteAdSpend: deleteAdSpend,
     addRecurring: addRecurring,
@@ -359,9 +542,15 @@
     stopRecurring: stopRecurring,
     deleteRecurring: deleteRecurring,
     addOneOff: addOneOff,
+    updateOneOff: updateOneOff,
     deleteOneOff: deleteOneOff,
+    supprimer: supprimer,
+    restaurer: restaurer,
+    corbeille: corbeille,
     saveSettings: saveSettings,
-    get db() { return etat.db; }
+    changePassword: changePassword,
+    get db() { return vueVivante(); },
+    get dbBrut() { return etat.db; }
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = root.HF.data;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

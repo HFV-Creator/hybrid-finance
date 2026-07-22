@@ -149,11 +149,14 @@
 
       /* Vérification faite APRÈS la connexion. Là, l'utilisateur est authentifié :
          la Row Level Security le laisse voir les lignes. Si la table settings est
-         TOUJOURS vide à ce moment-là, c'est que la ligne manque vraiment. */
+         TOUJOURS vide à ce moment-là, c'est que la ligne manque vraiment.
+         On demande aussi la colonne monthly_goal : elle n'existe que depuis la
+         version 2. Si la base répond « colonne inconnue », c'est que le fichier
+         supabase/migration-v2.sql n'a pas encore été exécuté. */
       async checkReglages() {
         var res;
         try {
-          res = await sb.from('settings').select('id').limit(1);
+          res = await sb.from('settings').select('id, monthly_goal').limit(1);
         } catch (e) {
           return {
             ok: false, technical: String(e && e.message || e), problems: [{
@@ -163,6 +166,16 @@
           };
         }
         if (res.error) {
+          var codeCol = String(res.error.code || '');
+          var msgCol = String(res.error.message || '');
+          if (codeCol === '42703' || /monthly_goal/.test(msgCol)) {
+            return {
+              ok: false, technical: msgCol, problems: [{
+                what: 'La base de données n\'est pas encore à jour pour la version 2.',
+                fix: 'Exécute le fichier <b>supabase/migration-v2.sql</b> dans le SQL Editor de Supabase, en suivant la section <b>« Mettre la base de données à jour »</b> du guide <b>MISE-A-JOUR-V2.md</b>. Il ajoute seulement des colonnes : tes données ne bougent pas.'
+              }]
+            };
+          }
           return {
             ok: false, technical: res.error.message || '', problems: [{
               what: 'Supabase a répondu une erreur inattendue.',
@@ -225,6 +238,33 @@
         var res = await sb.from('settings').update(patch).eq('id', 1).select().single();
         if (res.error) throw res.error;
         return res.data;
+      },
+
+      /* Changement du mot de passe de la personne connectée (écran « Mon compte »).
+         On re-vérifie d'abord le mot de passe ACTUEL par une vraie connexion :
+         sans ça, n'importe qui devant un ordinateur resté ouvert pourrait changer
+         le mot de passe sans le connaître. */
+      async changePassword(email, actuel, nouveau) {
+        var res;
+        try {
+          res = await sb.auth.signInWithPassword({ email: String(email || '').trim(), password: actuel || '' });
+        } catch (e) {
+          var er = new Error('reseau'); er.code = 'reseau'; throw er;
+        }
+        if (res.error) {
+          var err = new Error(String(res.error.message || ''));
+          err.code = /invalid login credentials/i.test(err.message) ? 'mauvais_mdp' : 'inconnu';
+          throw err;
+        }
+        var up = await sb.auth.updateUser({ password: nouveau });
+        if (up.error) {
+          var e2 = new Error(String(up.error.message || ''));
+          if (/different from the old/i.test(e2.message) || /should be different/i.test(e2.message)) e2.code = 'meme_mdp';
+          else if (/at least|too short|password/i.test(e2.message)) e2.code = 'mdp_faible';
+          else e2.code = 'inconnu';
+          throw e2;
+        }
+        return true;
       }
     };
   }

@@ -2,8 +2,19 @@
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- user-scalable=no : sur téléphone, l'application ne zoome pas au pincement,
+     comme une vraie app. viewport-fit=cover : elle s'étend jusque sous l'encoche
+     de l'iPhone (les marges de sécurité sont gérées dans app.css). -->
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#070708">
+<!-- « Ajouter à l'écran d'accueil » : plein écran, icône dédiée, fond sombre. -->
+<link rel="manifest" href="manifest.json">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Finances">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="icon" type="image/png" sizes="32x32" href="icons/icon-32.png">
 <title>Hybrid Coaching — Cockpit financier</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -72,6 +83,7 @@
     <div class="wrap">
       <nav class="tabs" id="tabs">
         <button data-vue="dashboard" class="active" data-testid="tab-dashboard">Tableau de bord</button>
+        <button data-vue="traiter" data-testid="tab-traiter">À traiter</button>
         <button data-vue="clients" data-testid="tab-clients">Clients &amp; ventes</button>
         <button data-vue="depenses" data-testid="tab-depenses">Dépenses</button>
         <button data-vue="reglages" data-testid="tab-reglages">Réglages</button>
@@ -88,6 +100,9 @@
 
     <!-- ---------- VUE TABLEAU DE BORD ---------- -->
     <div id="vue-dashboard">
+
+      <!-- Bandeau discret : des paiements attendent une décision (écran À traiter). -->
+      <button class="banner-traiter" id="banner-traiter" data-testid="banner-traiter" hidden></button>
 
       <div class="hero">
         <div class="hero-grid">
@@ -108,12 +123,19 @@
             </div>
           </div>
         </div>
+
+        <!-- Objectif de revenus du mois : barre fine sous le hero. -->
+        <div class="goal" id="goal-bar" data-testid="goal-bar" hidden>
+          <div class="goal-track"><div class="goal-fill" id="goal-fill"></div></div>
+          <div class="goal-lab" id="goal-lab" data-testid="goal-lab"></div>
+        </div>
       </div>
 
       <div class="kpis">
         <div class="kpi rev">
-          <div class="eyebrow">Revenus du mois</div>
+          <div class="eyebrow">Encaissé ce mois-ci</div>
           <div class="val" id="kpi-rev" data-testid="kpi-rev">—</div>
+          <div class="delta" id="kpi-attendu" data-testid="kpi-attendu"></div>
           <div class="delta" id="kpi-rev-delta"></div>
         </div>
         <div class="kpi dep">
@@ -204,15 +226,24 @@
       <section>
         <div class="sec-head">
           <h2>Évolution</h2><div class="rule"></div>
-          <div class="chart-toggle">
-            <button id="chart-6" class="active" data-testid="chart-6">6 mois</button>
-            <button id="chart-12" data-testid="chart-12">12 mois</button>
+          <div class="chart-toggles">
+            <div class="chart-toggle">
+              <button id="chart-attendu" class="active" data-testid="chart-attendu">Attendu</button>
+              <button id="chart-encaisse" data-testid="chart-encaisse">Encaissé</button>
+            </div>
+            <div class="chart-toggle">
+              <button id="chart-6" class="active" data-testid="chart-6">6 mois</button>
+              <button id="chart-12" data-testid="chart-12">12 mois</button>
+            </div>
           </div>
         </div>
         <div class="card">
-          <div class="chart" id="chart" data-testid="chart"></div>
+          <div class="chart-zone">
+            <div class="chart" id="chart" data-testid="chart"></div>
+            <div class="goal-line" id="chart-goal" data-testid="chart-goal" hidden><span></span></div>
+          </div>
           <div class="legend">
-            <span><span class="dot r"></span>Revenus</span>
+            <span><span class="dot r"></span><span id="legend-rev">Revenus attendus</span></span>
             <span><span class="dot d"></span>Dépenses</span>
             <span><span class="dot p"></span>Profit</span>
           </div>
@@ -238,6 +269,18 @@
             <button class="btn" id="btn-export-annee" data-testid="btn-export-annee">Exporter toute l'année</button>
           </div>
         </div>
+      </section>
+    </div>
+
+    <!-- ---------- VUE À TRAITER ---------- -->
+    <div id="vue-traiter" hidden>
+      <section>
+        <div class="sec-head">
+          <h2>À traiter</h2><div class="rule"></div>
+          <span class="hint">Le rituel du mois : une décision par paiement dû</span>
+        </div>
+        <div id="traiter-total" class="traiter-total" data-testid="traiter-total" hidden></div>
+        <div id="traiter-liste" data-testid="traiter-liste"></div>
       </section>
     </div>
 
@@ -267,13 +310,13 @@
       <section>
         <div class="sec-head">
           <h2>Paiements du mois</h2><div class="rule"></div>
-          <span class="hint">Un clic sur la pastille change le statut</span>
+          <span class="hint">La pastille change le statut · les dates se modifient en cliquant dessus</span>
         </div>
         <div class="card">
           <div class="table-scroll">
             <table>
               <thead>
-                <tr><th>Échéance</th><th>Client</th><th>Plan</th><th class="right">Montant</th><th>Statut</th></tr>
+                <tr><th>Échéance</th><th>Client</th><th class="col-plan">Plan</th><th class="right">Montant</th><th>Payée le</th><th>Statut</th></tr>
               </thead>
               <tbody id="paiements-body" data-testid="paiements-body"></tbody>
             </table>
@@ -335,6 +378,7 @@
               </table>
             </div>
             <button class="add-row" id="btn-add-ponct" data-testid="btn-add-ponct">+ Ajouter une dépense ponctuelle</button>
+            <button class="add-row" id="btn-copier-depenses" data-testid="btn-copier-depenses">Reprendre les dépenses du mois dernier</button>
           </div>
         </section>
       </div>
@@ -392,6 +436,19 @@
                 </label>
               </div>
 
+              <div class="form-row">
+                <label class="field">
+                  <span>Objectif de revenus mensuel ($)</span>
+                  <input type="number" id="set-goal" data-testid="set-goal" min="0" step="50">
+                  <span class="aide">Le même chaque mois. Laisse vide pour ne pas afficher d'objectif.</span>
+                </label>
+                <label class="field">
+                  <span>Objectif spécial — <span id="lab-goal-mois">ce mois-ci</span></span>
+                  <input type="number" id="set-goal-mois" data-testid="set-goal-mois" min="0" step="50">
+                  <span class="aide">Pour ce mois-là seulement. Vide = l'objectif habituel s'applique.</span>
+                </label>
+              </div>
+
               <div class="split-preview" id="split-preview" data-testid="split-preview">
                 <div class="side steph" id="prev-a" style="width:50%">50 %</div>
                 <div class="side alex" id="prev-b" style="width:50%">50 %</div>
@@ -414,6 +471,50 @@
             </div>
           </div>
         </div>
+      </section>
+
+      <section>
+        <div class="sec-head"><h2>Mon compte</h2><div class="rule"></div>
+          <span class="hint">Chacun change son propre mot de passe ici</span>
+        </div>
+        <div class="grid-2">
+          <div class="card">
+            <form id="form-compte">
+              <div class="form-err" id="compte-err" data-testid="compte-err" hidden></div>
+              <div class="form-ok" id="compte-ok" data-testid="compte-ok" hidden></div>
+              <label class="field">
+                <span>Mot de passe actuel</span>
+                <input type="password" id="cpt-actuel" data-testid="cpt-actuel" autocomplete="current-password" required>
+              </label>
+              <div class="form-row">
+                <label class="field">
+                  <span>Nouveau mot de passe</span>
+                  <input type="password" id="cpt-nouveau" data-testid="cpt-nouveau" autocomplete="new-password" required>
+                </label>
+                <label class="field">
+                  <span>Confirme le nouveau</span>
+                  <input type="password" id="cpt-confirme" data-testid="cpt-confirme" autocomplete="new-password" required>
+                </label>
+              </div>
+              <button type="submit" class="btn wide" id="btn-cpt" data-testid="btn-cpt">Changer mon mot de passe</button>
+            </form>
+          </div>
+          <div class="card">
+            <div class="eyebrow">Pourquoi ici ?</div>
+            <p style="color:var(--muted);font-size:14px;margin-top:12px">
+              Chaque associé gère son propre mot de passe, sans passer par l'autre.
+              Il faut connaître le mot de passe <b>actuel</b> pour le changer :
+              un ordinateur resté ouvert ne suffit pas.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div class="sec-head"><h2>Corbeille</h2><div class="rule"></div>
+          <span class="hint">Tout ce qui a été supprimé depuis 30 jours, restaurable en un clic</span>
+        </div>
+        <div class="card" id="corbeille" data-testid="corbeille"></div>
       </section>
     </div>
 

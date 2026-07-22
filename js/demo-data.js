@@ -35,7 +35,9 @@
         partner_a_email: EMAIL_A,
         partner_b_email: EMAIL_B,
         split_a_pct: 50,
-        daily_ad_budget: 120
+        daily_ad_budget: 120,
+        monthly_goal: 12000,
+        monthly_goal_overrides: {}
       },
       clients: [], sales: [], payments: [],
       ad_spend: [], recurring_expenses: [], one_off_expenses: []
@@ -43,6 +45,12 @@
 
     var nc = 0, ns = 0, np = 0, na = 0, nr = 0, no = 0;
     function jour(mkX, d) { return mkX + '-' + (d < 10 ? '0' + d : d); }
+    /* Décale une date civile de n jours (uniquement pour fabriquer la démo). */
+    function jourPlus(iso, n) {
+      var p = String(iso).split('-');
+      var d = new Date(Date.UTC(Number(p[0]), Number(p[1]) - 1, Number(p[2]) + n));
+      return d.toISOString().slice(0, 10);
+    }
 
     /* --- 14 clients, répartis sur les trois types de vente --- */
     var CLIENTS = [
@@ -60,7 +68,10 @@
       ['Jonathan C.', 'pif', 1450, { moisAvant: 1, label: 'PIF — 8 semaines', jour: 12 }],
       ['Laurie B.', 'abonnement', 1000, { moisAvant: 0, jour: 6 }],
       ['Félix M.', 'abonnement', 900, { moisAvant: 10 }],
-      ['Noémie D.', 'abonnement', 850, { moisAvant: 0, jour: 9 }]
+      ['Noémie D.', 'abonnement', 850, { moisAvant: 0, jour: 9 }],
+      // client perdu : son abonnement s'est terminé il y a deux mois — il nourrit
+      // le signal de rétention « clients perdus » et la durée de vie moyenne.
+      ['Gabriel H.', 'abonnement', 900, { moisAvant: 8, finApres: -2 }]
     ];
 
     CLIENTS.forEach(function (row, i) {
@@ -104,7 +115,7 @@
        Tout ce qui est ancien est payé. Dans le mois courant, on laisse volontairement
        un paiement en retard et deux en attente, pour que le tableau de bord ait
        quelque chose à raconter (« paiements à récupérer »). */
-    var retardLaisse = 0, attenteLaisse = 0;
+    var retardLaisse = 0, attenteLaisse = 0, paiementEnRetard = null;
     db.payments.forEach(function (p) {
       var age = C.dayDiff(p.due_date, today);   // > 0 = échéance passée
       if (age < 0) return;                      // futur : reste en attente
@@ -113,10 +124,47 @@
         p.paid_date = p.due_date;
         return;
       }
-      if (age > C.LATE_AFTER_DAYS && retardLaisse < 1) { retardLaisse++; return; }  // laissé en retard
+      if (age > C.LATE_AFTER_DAYS && retardLaisse < 1) { retardLaisse++; paiementEnRetard = p; return; }  // laissé en retard
       if (age <= C.LATE_AFTER_DAYS && attenteLaisse < 1) { attenteLaisse++; return; } // laissé en attente
       p.status = 'paid';
       p.paid_date = p.due_date;
+    });
+
+    /* Retouches pour que chaque nouveauté de la v2 ait quelque chose à montrer. */
+
+    // Le paiement en retard a été relancé il y a 3 jours (écran À TRAITER).
+    if (paiementEnRetard) paiementEnRetard.reminded_date = jourPlus(today, -3);
+
+    // Émilie R. (c6) a sauté sa mensualité d'il y a deux mois, puis a repris :
+    // le mois sauté reste visible dans son historique mais ne compte nulle part.
+    var mkSaute = C.addMonths(mk, -2);
+    db.payments.forEach(function (p) {
+      if (p.client_id === 'c6' && C.monthKey(p.due_date) === mkSaute) {
+        p.status = 'saute';
+        p.paid_date = null;
+      }
+    });
+
+    // Marc-André T. (c1) a payé sa mensualité du mois dernier avec 6 jours de
+    // retard : son « retard moyen » et « il paie toujours en retard » restent visibles.
+    var mkPrec = C.addMonths(mk, -1);
+    db.payments.forEach(function (p) {
+      if (p.client_id === 'c1' && C.monthKey(p.due_date) === mkPrec && p.status === 'paid') {
+        p.paid_date = jourPlus(p.due_date, 6);
+      }
+    });
+
+    // Kevin B. (c3) n'a jamais payé sa mensualité du mois DERNIER, et a été
+    // relancé il y a 3 jours. Garantie calendaire : un paiement « en retard »
+    // (échéance dépassée de plus de 5 jours) et l'écran À traiter non vide
+    // existent CHAQUE jour du mois — en début de mois, aucune échéance du mois
+    // courant ne peut encore être en retard, celle du mois passé l'est toujours.
+    db.payments.forEach(function (p) {
+      if (p.client_id === 'c3' && C.monthKey(p.due_date) === mkPrec) {
+        p.status = 'pending';
+        p.paid_date = null;
+        p.reminded_date = jourPlus(today, -3);
+      }
     });
 
     /* --- Ads journaliers : 12 mois d'historique, jusqu'à aujourd'hui --- */
@@ -156,7 +204,9 @@
       ['Shooting photo — nouvelle offre', 850, 'autre', 0, 8],
       ['Ordinateur portable (montage)', 1800, 'autre', 4, 17],
       ['Formation copywriting', 495, 'autre', 2, 21],
-      ['Frais comptable annuel', 1200, 'autre', 5, 3]
+      ['Frais comptable annuel', 1200, 'autre', 5, 3],
+      // au mois dernier : donne quelque chose à « Reprendre les dépenses du mois dernier »
+      ['Montage de réels (pigiste)', 350, 'sous-traitance', 1, 19]
     ].forEach(function (e) {
       var emk = C.addMonths(mk, -e[3]);
       db.one_off_expenses.push({
@@ -164,6 +214,14 @@
         date: jour(emk, Math.min(e[4], C.daysInMonth(emk))),
         created_by: EMAIL_A, created_at: today
       });
+    });
+
+    // Une dépense supprimée il y a 5 jours : la Corbeille de la démo n'est pas vide.
+    db.one_off_expenses.push({
+      id: 'o' + (++no), label: 'Logiciel payé en double (erreur)', amount: 49,
+      category: 'logiciels', date: jour(mk, 2),
+      created_by: EMAIL_A, created_at: today,
+      deleted_at: jourPlus(today, -5) + 'T12:00:00.000Z'
     });
 
     return db;

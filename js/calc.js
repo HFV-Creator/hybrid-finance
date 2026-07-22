@@ -135,15 +135,21 @@
     return out;
   }
 
-  /* Statut affiché d'un paiement : payé / en retard / en attente. */
+  /* Statut affiché d'un paiement : sauté / payé / en retard / en attente.
+     « Sauté » prime sur tout : c'est une information (le client a passé son
+     mois), pas une dette — un paiement sauté n'est jamais « en retard ». */
   function paymentStatus(payment, todayIso) {
+    if (payment.status === 'saute') return 'saute';
     if (payment.status === 'paid') return 'paid';
     if (dayDiff(payment.due_date, todayIso) > LATE_AFTER_DAYS) return 'late';
     return 'pending';
   }
 
   function statusLabel(s) {
-    return s === 'paid' ? 'Payé' : (s === 'late' ? 'En retard' : 'En attente');
+    if (s === 'paid') return 'Payé';
+    if (s === 'late') return 'En retard';
+    if (s === 'saute') return 'Sauté';
+    return 'En attente';
   }
 
   /* Montant total d'une vente (utile pour l'affichage). */
@@ -162,16 +168,24 @@
 
   /* ---------- sélections par mois ---------- */
 
+  /* Une ligne portant deleted_at (dans la corbeille) n'existe plus pour AUCUN
+     calcul. Le filtre vit ici, au plus près des chiffres, en plus de celui de
+     la couche de données : un total qui compte une ligne supprimée est le genre
+     de bug qu'on ne remarque qu'au bilan. */
+  function vivants(rows) {
+    return (rows || []).filter(function (r) { return !r.deleted_at; });
+  }
+
   function paymentsOfMonth(db, mk) {
-    return (db.payments || []).filter(function (p) { return monthKey(p.due_date) === mk; });
+    return vivants(db.payments).filter(function (p) { return monthKey(p.due_date) === mk; });
   }
 
   function adSpendOfMonth(db, mk) {
-    return (db.ad_spend || []).filter(function (a) { return monthKey(a.day) === mk; });
+    return vivants(db.ad_spend).filter(function (a) { return monthKey(a.day) === mk; });
   }
 
   function recurringOfMonth(db, mk) {
-    return (db.recurring_expenses || []).filter(function (r) {
+    return vivants(db.recurring_expenses).filter(function (r) {
       if (monthsBetween(monthKey(r.start_date), mk) < 0) return false;             // pas encore commencé
       if (r.end_date && monthsBetween(mk, monthKey(r.end_date)) < 0) return false; // déjà arrêté
       return true;
@@ -179,7 +193,7 @@
   }
 
   function oneOffOfMonth(db, mk) {
-    return (db.one_off_expenses || []).filter(function (e) { return monthKey(e.date) === mk; });
+    return vivants(db.one_off_expenses).filter(function (e) { return monthKey(e.date) === mk; });
   }
 
   /* ---------- répartition du profit ---------- */
@@ -201,7 +215,11 @@
     var s = db.settings || {};
     var pays = paymentsOfMonth(db, mk);
 
-    var revenue = sum(pays, function (p) { return p.amount; });
+    // Un paiement « sauté » n'est plus attendu : il sort des revenus et du
+    // « à récupérer », mais reste dans la liste du mois — l'historique ne ment pas.
+    var attendus = pays.filter(function (p) { return paymentStatus(p, today) !== 'saute'; });
+
+    var revenue = sum(attendus, function (p) { return p.amount; });
     var encaisse = sum(pays.filter(function (p) { return paymentStatus(p, today) === 'paid'; }), function (p) { return p.amount; });
     var enRetard = pays.filter(function (p) { return paymentStatus(p, today) === 'late'; });
     var enAttente = pays.filter(function (p) { return paymentStatus(p, today) === 'pending'; });
@@ -227,6 +245,7 @@
       aRecuperer: aRecuperer,
       nbARecuperer: enRetard.length + enAttente.length,
       nbEnRetard: enRetard.length,
+      nbSautes: pays.length - attendus.length,
       paiements: pays,
       depenses: { ads: ads, recurrentes: recur, ponctuelles: ponct, horsAds: horsAds, total: depenses },
       profit: profit,
@@ -243,22 +262,24 @@
     };
   }
 
-  /* Clients ayant au moins un paiement attendu dans le mois. */
+  /* Clients ayant au moins un paiement attendu dans le mois.
+     Choix assumé : un client dont le SEUL paiement du mois est « sauté » reste
+     un client actif — sauter un mois n'en fait pas un ex-client. */
   function clientsActifsDuMois(db, mk) {
     var ids = {};
     paymentsOfMonth(db, mk).forEach(function (p) { ids[p.client_id] = true; });
-    return (db.clients || []).filter(function (c) { return ids[c.id]; });
+    return vivants(db.clients).filter(function (c) { return ids[c.id]; });
   }
 
   /* Nouveaux clients = clients dont la première vente démarre dans le mois. */
   function newClientsInMonth(db, mk) {
     var premiere = {};
-    (db.sales || []).forEach(function (s) {
+    vivants(db.sales).forEach(function (s) {
       if (!premiere[s.client_id] || compareDates(s.start_date, premiere[s.client_id]) < 0) {
         premiere[s.client_id] = s.start_date;
       }
     });
-    return (db.clients || []).filter(function (c) {
+    return vivants(db.clients).filter(function (c) {
       return premiere[c.id] && monthKey(premiere[c.id]) === mk;
     });
   }
@@ -311,9 +332,208 @@
     for (var i = n - 1; i >= 0; i--) {
       var m = addMonths(mk, -i);
       var s = monthSummary(db, m, todayIso);
-      out.push({ month: m, revenue: s.revenue, depenses: s.depenses.total, profit: s.profit });
+      out.push({ month: m, revenue: s.revenue, encaisse: s.encaisse, depenses: s.depenses.total, profit: s.profit });
     }
     return out;
+  }
+
+  /* ---------- à traiter ---------- */
+
+  /* L'écran de décision mensuel : chaque paiement dont l'échéance est atteinte
+     (aujourd'hui inclus) réclame un choix — encaissé ? sauté ? à relancer ?
+     Seuls les paiements encore « pending » en base attendent quelque chose :
+     ni les payés ni les sautés n'ont besoin d'une décision. */
+  function aTraiter(db, todayIso) {
+    var today = todayIso || todayISO();
+    var items = vivants(db.payments)
+      .filter(function (p) {
+        return p.status !== 'paid' && p.status !== 'saute' && compareDates(p.due_date, today) <= 0;
+      })
+      .sort(function (a, b) { return compareDates(a.due_date, b.due_date); });
+
+    var parMois = [];
+    var groupe = null;
+    items.forEach(function (p) {
+      var mk = monthKey(p.due_date);
+      if (!groupe || groupe.month !== mk) {
+        groupe = { month: mk, items: [] };
+        parMois.push(groupe);
+      }
+      groupe.items.push(p);
+    });
+
+    return { total: sum(items, function (p) { return p.amount; }), nb: items.length, parMois: parMois };
+  }
+
+  /* ---------- rétention ---------- */
+
+  /* Les définitions ci-dessous SONT la spécification de la fidélité :
+     - ancienneté d'un client au mois mk = monthsBetween(premier mois d'échéance,
+       min(dernier mois d'échéance, mk)) + 1. Les paiements « sautés » comptent :
+       un mois sauté reste un mois d'abonnement.
+     - dureeVieMoyenne = ancienneté moyenne des clients arrivés au plus tard en mk
+       (1 décimale, null si aucun).
+     - perdus (pendant mk) = clients dont la dernière échéance date de mk − 2
+       (on n'attend plus rien d'eux depuis deux mois) + clients dont une vente se
+       termine (end_date) dans mk sans aucune échéance après mk (un abonnement
+       actif qui prend fin). Chaque client compté une seule fois.
+     - moisMoyenActifs = ancienneté moyenne des clients ayant une échéance dans mk
+       (1 décimale, null si aucun). */
+  function retention(db, mk, todayIso) {
+    var infos = {};   // client_id -> { first, last, actif (échéance dans mk) }
+    vivants(db.payments).forEach(function (p) {
+      var m = monthKey(p.due_date);
+      var i = infos[p.client_id] || (infos[p.client_id] = { first: m, last: m, actif: false });
+      if (m < i.first) i.first = m;
+      if (m > i.last) i.last = m;
+      if (m === mk) i.actif = true;
+    });
+
+    var clients = vivants(db.clients).filter(function (c) { return infos[c.id]; });
+
+    function anciennete(i) {
+      var fin = i.last < mk ? i.last : mk;
+      return monthsBetween(i.first, fin) + 1;
+    }
+    function moyenne(liste) {
+      if (!liste.length) return null;
+      var t = 0;
+      liste.forEach(function (c) { t += anciennete(infos[c.id]); });
+      return Math.round(t / liste.length * 10) / 10;
+    }
+
+    var dureeVieMoyenne = moyenne(clients.filter(function (c) { return infos[c.id].first <= mk; }));
+    var moisMoyenActifs = moyenne(clients.filter(function (c) { return infos[c.id].actif; }));
+
+    var finies = {};   // clients dont une vente se termine dans mk
+    vivants(db.sales).forEach(function (v) {
+      if (v.end_date && monthKey(v.end_date) === mk) finies[v.client_id] = true;
+    });
+    var mkMoins2 = addMonths(mk, -2);
+    var perdus = clients.filter(function (c) {
+      var i = infos[c.id];
+      if (i.last === mkMoins2) return true;         // deux mois de silence
+      return !!finies[c.id] && i.last <= mk;        // vente terminée, rien attendu après
+    }).length;
+
+    function enMois(v) { return F.nombre(v, Number.isInteger(v) ? 0 : 1) + ' mois'; }
+
+    var tiles = [];
+    if (dureeVieMoyenne != null) {
+      tiles.push({
+        num: enMois(dureeVieMoyenne),
+        tone: 'blue',
+        text: 'de durée de vie moyenne par client. Multipliée par le prix mensuel, <b>c\'est ce que vaut vraiment un nouveau client</b> — et le maximum raisonnable à payer pour l\'acquérir.'
+      });
+    }
+    tiles.push(perdus > 0
+      ? {
+        num: perdus + ' client' + (perdus > 1 ? 's' : ''),
+        tone: 'red',
+        text: (perdus > 1 ? 'perdus' : 'perdu') + ' ce mois-ci (plus aucune échéance depuis deux mois, ou abonnement terminé). <b>Un message personnel vaut la peine</b> : un client parti sans nouvelles revient rarement tout seul.'
+      }
+      : {
+        num: '0 client',
+        tone: 'teal',
+        text: 'perdu ce mois-ci. <b>Personne n\'est parti</b> — continue ce qui fidélise.'
+      });
+    if (moisMoyenActifs != null) {
+      tiles.push({
+        num: enMois(moisMoyenActifs),
+        tone: 'teal',
+        text: 'd\'ancienneté moyenne chez les clients actifs ce mois-ci. Si ce chiffre monte, <b>la clientèle se fidélise</b> ; s\'il chute, les nouveaux remplacent des habitués partis.'
+      });
+    }
+
+    return { dureeVieMoyenne: dureeVieMoyenne, perdus: perdus, moisMoyenActifs: moisMoyenActifs, tiles: tiles };
+  }
+
+  /* ---------- objectif de revenus ---------- */
+
+  /* L'objectif propre au mois (override) prime sur l'objectif par défaut ;
+     null = pas d'objectif, la barre de progression disparaît. Une valeur
+     invalide ou ≤ 0 est ignorée plutôt que d'afficher une barre absurde. */
+  function goalForMonth(settings, mk) {
+    var s = settings || {};
+    var o = s.monthly_goal_overrides || {};
+    var v = Number(o[mk]);
+    if (isFinite(v) && v > 0) return v;
+    var g = Number(s.monthly_goal);
+    return (isFinite(g) && g > 0) ? g : null;
+  }
+
+  /* Progression vers l'objectif : on mesure l'ENCAISSÉ, pas l'attendu — un
+     objectif se célèbre avec l'argent réellement reçu. joursRestants = jours
+     APRÈS aujourd'hui (le 20 d'un mois de 31 jours → 11) ; 0 pour un mois
+     passé, le mois entier pour un mois futur. */
+  function goalProgress(db, mk, todayIso) {
+    var today = todayIso || todayISO();
+    var objectif = goalForMonth(db.settings || {}, mk);
+    if (objectif == null) return null;
+    var s = monthSummary(db, mk, today);
+    var todayMk = monthKey(today);
+    var joursRestants;
+    if (mk === todayMk) joursRestants = daysInMonth(mk) - Number(today.slice(8, 10));
+    else if (mk < todayMk) joursRestants = 0;
+    else joursRestants = daysInMonth(mk);
+    return {
+      objectif: objectif,
+      encaisse: s.encaisse,
+      pct: round2(s.encaisse / objectif * 100),   // peut dépasser 100
+      joursRestants: joursRestants
+    };
+  }
+
+  /* ---------- fiche client ---------- */
+
+  /* Tout ce que la fiche d'un client affiche, toutes années confondues. */
+  function clientStats(db, clientId, todayIso) {
+    var today = todayIso || todayISO();
+    var ventes = vivants(db.sales).filter(function (v) { return v.client_id === clientId; });
+    var pays = vivants(db.payments)
+      .filter(function (p) { return p.client_id === clientId; })
+      .sort(function (a, b) { return compareDates(a.due_date, b.due_date); });
+
+    var depuis = null;
+    ventes.forEach(function (v) {
+      if (!depuis || compareDates(v.start_date, depuis) < 0) depuis = v.start_date;
+    });
+
+    var payes = pays.filter(function (p) { return p.status === 'paid'; });
+
+    // « Il paie en retard » doit rester visible même une fois le paiement réglé :
+    // on compte les retards en cours ET les paiements réglés plus de
+    // LATE_AFTER_DAYS jours après leur échéance.
+    var nbRetards = pays.filter(function (p) {
+      if (paymentStatus(p, today) === 'late') return true;
+      return p.status === 'paid' && p.paid_date && dayDiff(p.due_date, p.paid_date) > LATE_AFTER_DAYS;
+    }).length;
+
+    // Retard moyen sur les paiements réglés (payé d'avance = 0, jamais négatif).
+    var avecDate = payes.filter(function (p) { return p.paid_date; });
+    var retardMoyenJours = null;
+    if (avecDate.length) {
+      var total = 0;
+      avecDate.forEach(function (p) { total += Math.max(0, dayDiff(p.due_date, p.paid_date)); });
+      retardMoyenJours = Math.round(total / avecDate.length);
+    }
+
+    // Plan actuel = la vente la plus récente (par date de début) ni archivée ni supprimée.
+    var derniere = null;
+    ventes.forEach(function (v) {
+      if (v.archived) return;
+      if (!derniere || compareDates(v.start_date, derniere.start_date) > 0) derniere = v;
+    });
+
+    return {
+      depuis: depuis,
+      totalPaye: sum(payes, function (p) { return p.amount; }),
+      nbSautes: pays.filter(function (p) { return p.status === 'saute'; }).length,
+      nbRetards: nbRetards,
+      retardMoyenJours: retardMoyenJours,
+      planActuel: derniere ? saleLabel(derniere) : null,
+      historique: pays   // tout l'historique, sautés inclus : la fiche raconte la vraie relation
+    };
   }
 
   /* ---------- signaux business (règles simples, aucun appel IA) ---------- */
@@ -427,7 +647,7 @@
   }
 
   function nomClient(db, id) {
-    var c = (db.clients || []).find(function (x) { return x.id === id; });
+    var c = vivants(db.clients).find(function (x) { return x.id === id; });
     return c ? c.name : '(client supprimé)';
   }
 
@@ -443,7 +663,7 @@
   }
 
   function vente(db, id) {
-    return (db.sales || []).find(function (x) { return x.id === id; });
+    return vivants(db.sales).find(function (x) { return x.id === id; });
   }
 
   /* CSV d'un mois : revenus détaillés + dépenses détaillées + totaux. */
@@ -454,12 +674,15 @@
     rows.push(['Hybrid Finance — Export ' + F.moisLong(mk)]);
     rows.push([]);
     rows.push(['REVENUS']);
-    rows.push(['Date', 'Client', 'Plan', 'Montant', 'Statut', 'Ajouté par']);
+    rows.push(['Date', 'Client', 'Plan', 'Montant', 'Statut', 'Payée le', 'Ajouté par']);
+    // Les paiements sautés sont listés (l'export raconte le mois complet) mais
+    // les totaux viennent de monthSummary, qui les exclut déjà des revenus.
     s.paiements.slice().sort(function (a, b) { return compareDates(a.due_date, b.due_date); })
       .forEach(function (p) {
         var v = vente(db, p.sale_id);
         rows.push([p.due_date, nomClient(db, p.client_id), v ? saleLabel(v) : '',
-          csvMontant(p.amount), statusLabel(paymentStatus(p, today)), identite(db, p.created_by)]);
+          csvMontant(p.amount), statusLabel(paymentStatus(p, today)), p.paid_date || '',
+          identite(db, p.created_by)]);
       });
     rows.push(['', '', 'Total revenus', csvMontant(s.revenue)]);
     rows.push(['', '', 'Encaissé', csvMontant(s.encaisse)]);
@@ -553,6 +776,11 @@
     simulate: simulate,
     ytdShares: ytdShares,
     evolution: evolution,
+    aTraiter: aTraiter,
+    retention: retention,
+    goalForMonth: goalForMonth,
+    goalProgress: goalProgress,
+    clientStats: clientStats,
     signals: signals,
     csvMonth: csvMonth,
     csvYear: csvYear

@@ -97,6 +97,16 @@
     return MOIS_ABREGES[Number(p[1]) - 1] + ' ' + p[0];
   }
 
+  /* « relancé il y a 3 jours » : 0 -> "aujourd'hui", 1 -> "hier", n -> "il y a n jours".
+     Une valeur invalide ou négative retombe sur "aujourd'hui" plutôt que d'afficher
+     une phrase cassée. */
+  function ilYA(jours) {
+    var n = Math.round(Number(jours) || 0);
+    if (n <= 0) return 'aujourd\'hui';
+    if (n === 1) return 'hier';
+    return 'il y a ' + n + ' jours';
+  }
+
   var api = {
     NBSP: NBSP,
     money: money,
@@ -110,7 +120,8 @@
     moisCourt: moisCourt,
     moisAnnee: moisAnnee,
     dateLongue: dateLongue,
-    dateCourte: dateCourte
+    dateCourte: dateCourte,
+    ilYA: ilYA
   };
 
   root.HF = root.HF || {};
