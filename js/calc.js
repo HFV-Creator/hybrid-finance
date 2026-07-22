@@ -176,8 +176,29 @@
     return (rows || []).filter(function (r) { return !r.deleted_at; });
   }
 
+  /* LA RÈGLE D'ARCHIVAGE, et elle seule : un paiement NON PAYÉ dont la vente OU
+     le client est archivé n'existe pour AUCUNE vue et AUCUN total. Archiver une
+     vente, c'est dire « celle-là n'aura pas lieu » ; laisser ses échéances dans
+     les revenus attendus fait apparaître le client deux fois et gonfle le mois.
+     Un paiement DÉJÀ PAYÉ reste toujours compté, archivé ou non : cet argent a
+     réellement circulé, l'effacer réécrirait l'histoire.
+     Filtre de CALCUL, jamais de suppression de lignes : une base déjà polluée se
+     remet d'aplomb toute seule, sans qu'on touche à un seul enregistrement.
+     Tous les sélecteurs de paiements passent par ici — deux écrans qui filtrent
+     chacun de leur côté finissent toujours par ne plus dire la même chose. */
+  function paiementsActifs(db) {
+    var ventesArchivees = {};
+    var clientsArchives = {};
+    ((db && db.sales) || []).forEach(function (v) { if (v.archived) ventesArchivees[v.id] = true; });
+    ((db && db.clients) || []).forEach(function (c) { if (c.archived) clientsArchives[c.id] = true; });
+    return vivants(db && db.payments).filter(function (p) {
+      if (p.status === 'paid') return true;
+      return !ventesArchivees[p.sale_id] && !clientsArchives[p.client_id];
+    });
+  }
+
   function paymentsOfMonth(db, mk) {
-    return vivants(db.payments).filter(function (p) { return monthKey(p.due_date) === mk; });
+    return paiementsActifs(db).filter(function (p) { return monthKey(p.due_date) === mk; });
   }
 
   function adSpendOfMonth(db, mk) {
@@ -208,11 +229,31 @@
     return { a: a, b: b, pctA: pa, pctB: round2(100 - pa) };
   }
 
+  /* Le pourcentage d'un mois est FIGÉ dans settings.split_history au moment où
+     les associés changent leur entente : un mois déjà vécu doit garder les
+     chiffres sur lesquels ils s'étaient entendus, sinon changer le partage
+     réécrirait rétroactivement tout l'historique des parts.
+     Sans valeur figée pour ce mois : le pourcentage courant. Sans réglage du
+     tout : 50/50. Une valeur absente, vide ou hors bornes n'est pas une entente,
+     c'est du bruit — on retombe sur le pourcentage courant. */
+  function splitPctForMonth(db, mk) {
+    var s = (db && db.settings) || {};
+    var h = s.split_history || {};
+    if (h[mk] != null && h[mk] !== '') {
+      var fige = Number(h[mk]);
+      if (isFinite(fige) && fige >= 0 && fige <= 100) return fige;
+    }
+    if (s.split_a_pct != null && s.split_a_pct !== '') {
+      var courant = Number(s.split_a_pct);
+      if (isFinite(courant)) return courant;
+    }
+    return 50;
+  }
+
   /* ---------- synthèse d'un mois ---------- */
 
   function monthSummary(db, mk, todayIso) {
     var today = todayIso || todayISO();
-    var s = db.settings || {};
     var pays = paymentsOfMonth(db, mk);
 
     // Un paiement « sauté » n'est plus attendu : il sort des revenus et du
@@ -232,7 +273,7 @@
     var horsAds = round2(recur + ponct);
 
     var profit = round2(revenue - depenses);
-    var split = splitProfit(profit, s.split_a_pct == null ? 50 : s.split_a_pct);
+    var split = splitProfit(profit, splitPctForMonth(db, mk));
     var dim = daysInMonth(mk);
     var nouveaux = newClientsInMonth(db, mk).length;
     // dans le mois EN COURS, la moyenne se fait sur les jours déjà passés
@@ -345,7 +386,7 @@
      ni les payés ni les sautés n'ont besoin d'une décision. */
   function aTraiter(db, todayIso) {
     var today = todayIso || todayISO();
-    var items = vivants(db.payments)
+    var items = paiementsActifs(db)
       .filter(function (p) {
         return p.status !== 'paid' && p.status !== 'saute' && compareDates(p.due_date, today) <= 0;
       })
@@ -381,7 +422,7 @@
        (1 décimale, null si aucun). */
   function retention(db, mk, todayIso) {
     var infos = {};   // client_id -> { first, last, actif (échéance dans mk) }
-    vivants(db.payments).forEach(function (p) {
+    paiementsActifs(db).forEach(function (p) {
       var m = monthKey(p.due_date);
       var i = infos[p.client_id] || (infos[p.client_id] = { first: m, last: m, actif: false });
       if (m < i.first) i.first = m;
@@ -490,7 +531,7 @@
   function clientStats(db, clientId, todayIso) {
     var today = todayIso || todayISO();
     var ventes = vivants(db.sales).filter(function (v) { return v.client_id === clientId; });
-    var pays = vivants(db.payments)
+    var pays = paiementsActifs(db)
       .filter(function (p) { return p.client_id === clientId; })
       .sort(function (a, b) { return compareDates(a.due_date, b.due_date); });
 
@@ -630,6 +671,355 @@
     return out.slice(0, 5);
   }
 
+  /* ---------- versements aux associés ---------- */
+
+  /* Un versement n'est PAS une dépense : c'est du profit DÉJÀ gagné qui change
+     de poche. Il ne touche donc ni les revenus, ni les dépenses, ni le profit,
+     ni la marge, ni le ROAS, ni la part calculée de qui que ce soit —
+     monthSummary() ne lit jamais db.payouts, et c'est volontaire. Le compter en
+     dépense amputerait le profit une deuxième fois, et l'erreur se propagerait
+     à chaque mois suivant. Un versement ne bouge qu'une seule chose : le SOLDE
+     dû à l'associé. */
+  function payoutsOfPeriod(db, debut, fin) {
+    return vivants(db && db.payouts)
+      .filter(function (v) {
+        return compareDates(v.date, debut) >= 0 && compareDates(v.date, fin) <= 0;
+      })
+      .sort(function (a, b) { return compareDates(b.date, a.date); });   // du plus récent au plus ancien
+  }
+
+  /* Nom d'affichage d'un associé ('a' / 'b'), tel que saisi dans les réglages. */
+  function nomAssocie(db, partenaire) {
+    var s = (db && db.settings) || {};
+    return (partenaire === 'b') ? (s.partner_b_name || 'Alex') : (s.partner_a_name || 'Steph');
+  }
+
+  /* ---------- périodes ---------- */
+
+  /* « Depuis le début » part du mois du PLUS ANCIEN enregistrement, quelle que
+     soit la table : la première trace de l'entreprise peut très bien être une
+     dépense publicitaire faite des mois avant la première vente. Aucun mois de
+     démarrage n'est codé en dur — une base reprise en cours de route ou
+     restaurée doit s'afficher en entier, pas à partir d'une date inventée.
+     Base vide : le mois courant, pour ne jamais rendre une période inversée. */
+  function periodeDepuisLeDebut(db, todayIso) {
+    var today = todayIso || todayISO();
+    var min = null;
+    function voir(iso) {
+      if (!iso) return;
+      var s = String(iso);
+      if (min === null || compareDates(s, min) < 0) min = s;
+    }
+    paiementsActifs(db).forEach(function (p) { voir(p.due_date); });
+    vivants(db && db.sales).forEach(function (v) { voir(v.start_date); });
+    vivants(db && db.ad_spend).forEach(function (a) { voir(a.day); });
+    vivants(db && db.one_off_expenses).forEach(function (e) { voir(e.date); });
+    vivants(db && db.recurring_expenses).forEach(function (r) { voir(r.start_date); });
+    vivants(db && db.payouts).forEach(function (v) { voir(v.date); });
+    return {
+      debut: (min === null ? monthKey(today) : monthKey(min)) + '-01',
+      fin: lastDayOfMonth(monthKey(today))
+    };
+  }
+
+  function periodeAnnee(annee) {
+    var a = String(annee);
+    return { debut: a + '-01-01', fin: a + '-12-31' };
+  }
+
+  /* Liste inclusive des mois d'une période. Une fin antérieure au début rend une
+     liste vide plutôt qu'une boucle infinie. */
+  function moisDeLaPeriode(debut, fin) {
+    var out = [];
+    var m = monthKey(debut);
+    var dernier = monthKey(fin);
+    var garde = 0;
+    while (compareDates(m, dernier) <= 0 && garde++ < 1200) {
+      out.push(m);
+      m = addMonths(m, 1);
+    }
+    return out;
+  }
+
+  /* ---------- bilan d'une période ---------- */
+
+  /* Les définitions ci-dessous SONT la spécification du bilan :
+     - revenus, encaisse, depenses et profit sont la SOMME des monthSummary()
+       des mois de la période, jamais un calcul parallèle. Deux écrans qui
+       montrent le même argent doivent afficher le même chiffre au cent près ;
+       recalculer autrement, c'est se garantir deux vérités.
+     - depenses.parCategorie ventile le MÊME total par catégorie de dépense :
+       les ads journaliers comptent en « ads », les dépenses récurrentes et
+       ponctuelles dans LEUR catégorie (une récurrente catégorisée « ads » va
+       donc bien en « ads »). Les cinq clés existent toujours, à 0 s'il n'y a
+       rien, pour que la liste affichée ne change pas de forme d'un mois à
+       l'autre. Une catégorie inconnue tombe dans « autre » : la somme des
+       catégories doit rester EXACTEMENT le total, sans quoi le bilan ment.
+     - profitEncaisse d'un mois = encaissé du mois − dépenses du mois. C'est le
+       seul argent qui existe vraiment, donc le seul qu'on puisse se verser.
+     - part d'un associé = splitProfit(profitEncaisse du mois, pourcentage FIGÉ
+       de ce mois-là). Un mois déficitaire retranche (contribution négative) :
+       ramener une perte à zéro la ferait disparaître du solde.
+     - verse = somme de SES versements de la période ; solde = gagné − versé.
+       Un solde négatif n'est pas une erreur : l'associé a reçu une avance.
+
+     LE BILAN RAISONNE EN MOIS ENTIERS, parce qu'une part de profit n'existe que
+     par mois : il n'y a pas de « part du 1er au 15 ». Une date choisie au milieu
+     d'un mois tire donc TOUT ce mois-là — son profit ET ses versements.
+     La fenêtre est calculée une seule fois, à partir des mois réellement
+     additionnés, et sert aussi bien au profit qu'aux versements. Filtrer les
+     versements sur les dates DEMANDÉES pendant qu'on additionne des mois entiers
+     donnerait un solde faux sans jamais lever d'erreur : le profit d'un mois
+     complet crédité à l'associé, mais le versement déjà fait ce mois-là oublié —
+     l'entreprise paraîtrait devoir plus qu'elle ne doit.
+     Les bornes effectives sont RENVOYÉES (elles écrasent celles demandées) pour
+     que l'écran affiche la période réellement calculée. */
+  function bilan(db, debut, fin, todayIso) {
+    var today = todayIso || todayISO();
+    var mois = moisDeLaPeriode(monthKey(debut), monthKey(fin));
+    var debutEffectif = mois.length ? mois[0] + '-01' : debut;
+    var finEffective = mois.length ? lastDayOfMonth(mois[mois.length - 1]) : fin;
+    var versements = payoutsOfPeriod(db, debutEffectif, finEffective);
+
+    var revenus = 0, encaisse = 0, ads = 0, recurrentes = 0, ponctuelles = 0;
+    var profit = 0, profitEncaisse = 0, gagneA = 0, gagneB = 0;
+
+    var parCategorie = {};
+    Object.keys(CATEGORIES).forEach(function (k) { parCategorie[k] = 0; });
+    function ajouterCategorie(cat, montant) {
+      var k = (cat && parCategorie[cat] !== undefined) ? cat : 'autre';
+      parCategorie[k] = round2(parCategorie[k] + (Number(montant) || 0));
+    }
+
+    var parMois = mois.map(function (m) {
+      var s = monthSummary(db, m, today);
+      var pe = round2(s.encaisse - s.depenses.total);
+      var part = splitProfit(pe, splitPctForMonth(db, m));
+
+      adSpendOfMonth(db, m).forEach(function (a) { ajouterCategorie('ads', a.amount); });
+      recurringOfMonth(db, m).forEach(function (r) { ajouterCategorie(r.category, r.amount); });
+      oneOffOfMonth(db, m).forEach(function (e) { ajouterCategorie(e.category, e.amount); });
+
+      var vA = sum(versements.filter(function (v) { return v.partner === 'a' && monthKey(v.date) === m; }),
+        function (v) { return v.amount; });
+      var vB = sum(versements.filter(function (v) { return v.partner === 'b' && monthKey(v.date) === m; }),
+        function (v) { return v.amount; });
+
+      revenus = round2(revenus + s.revenue);
+      encaisse = round2(encaisse + s.encaisse);
+      ads = round2(ads + s.depenses.ads);
+      recurrentes = round2(recurrentes + s.depenses.recurrentes);
+      ponctuelles = round2(ponctuelles + s.depenses.ponctuelles);
+      profit = round2(profit + s.profit);
+      profitEncaisse = round2(profitEncaisse + pe);
+      gagneA = round2(gagneA + part.a);
+      gagneB = round2(gagneB + part.b);
+
+      return {
+        month: m,
+        revenue: s.revenue,
+        encaisse: s.encaisse,
+        depenses: s.depenses.total,
+        profit: s.profit,
+        profitEncaisse: pe,
+        pctA: part.pctA,
+        partA: part.a,
+        partB: part.b,
+        verseA: vA,
+        verseB: vB
+      };
+    });
+
+    var verseA = sum(versements.filter(function (v) { return v.partner === 'a'; }), function (v) { return v.amount; });
+    var verseB = sum(versements.filter(function (v) { return v.partner === 'b'; }), function (v) { return v.amount; });
+
+    return {
+      debut: debutEffectif,
+      fin: finEffective,
+      mois: mois,
+      revenus: revenus,
+      encaisse: encaisse,
+      depenses: {
+        ads: ads,
+        recurrentes: recurrentes,
+        ponctuelles: ponctuelles,
+        horsAds: round2(recurrentes + ponctuelles),
+        total: round2(ads + recurrentes + ponctuelles),
+        parCategorie: parCategorie
+      },
+      profit: profit,
+      profitEncaisse: profitEncaisse,
+      partenaires: {
+        a: { gagne: gagneA, verse: verseA, solde: round2(gagneA - verseA) },
+        b: { gagne: gagneB, verse: verseB, solde: round2(gagneB - verseB) }
+      },
+      parMois: parMois,
+      versements: versements
+    };
+  }
+
+  /* « Profit d'avril », jamais « Profit de avril » : le français élide « de »
+     devant une voyelle ou un h muet. Les deux associés lisent ce relevé chaque
+     mois — une faute d'accord à cet endroit-là se voit tout de suite.
+     Aucun mois ne commence par un h, mais la règle est écrite en entier pour
+     qu'un libellé ajouté plus tard ne la contourne pas par accident. */
+  function elision(mot) {
+    var c = String(mot).charAt(0).toLowerCase();
+    return 'aàâäeéèêëiîïoôöuùûüyh'.indexOf(c) >= 0 ? 'd\'' : 'de ';
+  }
+
+  /* Le relevé d'un associé raconte le bilan ligne par ligne : une ligne de
+     profit par mois (datée au DERNIER jour du mois — un mois se solde une fois
+     fini), une ligne par versement à sa vraie date. À date égale le profit passe
+     AVANT le versement : on ne peut pas se verser un mois avant de l'avoir
+     gagné, et l'ordre inverse afficherait un solde négatif fantôme.
+     Le solde de la dernière ligne est, par construction, le « solde dû » du
+     bilan : c'est ce qui rend le relevé vérifiable à l'œil.
+     Les versements sont pris dans `bilan().versements`, jamais re-filtrés ici :
+     un second filtrage pourrait retenir une liste différente de celle qui a servi
+     au solde, et le relevé cesserait de tomber juste sur une plage personnalisée. */
+  function ledger(db, partenaire, debut, fin, todayIso) {
+    var qui = (partenaire === 'b') ? 'b' : 'a';
+    var cle = (qui === 'b') ? 'partB' : 'partA';
+    var b = bilan(db, debut, fin, todayIso);
+    var lignes = [];
+
+    b.parMois.forEach(function (m) {
+      var nom = F.moisSeul(m.month).toLowerCase();
+      lignes.push({
+        date: lastDayOfMonth(m.month),
+        type: 'profit',
+        libelle: 'Profit ' + elision(nom) + nom,
+        montant: m[cle]
+      });
+    });
+    b.versements.forEach(function (v) {
+      if (v.partner !== qui) return;
+      lignes.push({
+        date: v.date,
+        type: 'versement',
+        libelle: v.note || 'Versement',
+        montant: round2(0 - Number(v.amount))
+      });
+    });
+
+    lignes.sort(function (x, y) {
+      var c = compareDates(x.date, y.date);
+      if (c !== 0) return c;
+      if (x.type === y.type) return 0;
+      return x.type === 'profit' ? -1 : 1;
+    });
+
+    var solde = 0;
+    lignes.forEach(function (l) {
+      solde = round2(solde + l.montant);
+      l.solde = solde;
+    });
+    return lignes;
+  }
+
+  /* ---------- garde-fou contre les doublons de clients ---------- */
+
+  /* Deux fiches pour la même personne, c'est un revenu compté deux fois et un
+     historique coupé en deux. La comparaison ignore donc tout ce qui varie sans
+     changer l'identité : casse, accents, espaces en trop. */
+  function normaliserNom(s) {
+    return String(s == null ? '' : s)
+      .normalize('NFD')
+      .replace(/[̀-ͯ]/g, '')   // diacritiques détachés par NFD, écrits en échappement : invisibles dans le source
+      .toLowerCase()
+      .trim()
+      .replace(/\s+/g, ' ');
+  }
+
+  function clientsSimilaires(db, nom) {
+    var cible = normaliserNom(nom);
+    if (!cible) return [];
+    return vivants(db && db.clients).filter(function (c) { return normaliserNom(c.name) === cible; });
+  }
+
+  /* ---------- ce qu'une suppression emporterait ---------- */
+
+  /* La phrase de confirmation doit annoncer des chiffres VRAIS : « 2 ventes,
+     7 paiements, 3 400 $ encaissés, de mai à juillet ». On compte donc les
+     lignes vivantes qui partiraient réellement — y compris celles qu'un
+     archivage rend invisibles à l'écran, parce que la suppression, elle, les
+     emporte quand même. */
+  function impactSuppression(db, table, id) {
+    var ventes = [];
+    if (table === 'clients') {
+      ventes = vivants(db && db.sales).filter(function (v) { return v.client_id === id; });
+    } else if (table === 'sales') {
+      var v = vivants(db && db.sales).find(function (x) { return x.id === id; });
+      if (v) ventes = [v];
+    }
+    var idsVentes = {};
+    ventes.forEach(function (x) { idsVentes[x.id] = true; });
+
+    var pays = vivants(db && db.payments).filter(function (p) {
+      if (table === 'clients') return p.client_id === id || !!idsVentes[p.sale_id];
+      return !!idsVentes[p.sale_id];
+    });
+
+    var mois = [];
+    pays.forEach(function (p) {
+      var m = monthKey(p.due_date);
+      if (mois.indexOf(m) < 0) mois.push(m);
+    });
+    mois.sort();
+
+    return {
+      nbVentes: ventes.length,
+      nbPaiements: pays.length,
+      montantEncaisse: sum(pays.filter(function (p) { return p.status === 'paid'; }), function (p) { return p.amount; }),
+      mois: mois
+    };
+  }
+
+  /* ---------- aperçu du formulaire de vente ---------- */
+
+  /* La phrase affichée sous le formulaire est construite À PARTIR de
+     generatePayments() : un aperçu qui recalculerait les montants de son côté
+     pourrait annoncer autre chose que ce qui sera créé, et c'est exactement le
+     mensonge qu'on ne peut pas se permettre juste avant de signer.
+     Chaîne vide tant que les champs ne permettent pas de conclure — mieux vaut
+     rien afficher qu'une phrase à trous. */
+  function apercuVente(sale) {
+    var v = sale || {};
+    var debut = String(v.start_date || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(debut)) return '';
+
+    if (v.type === 'pif') {
+      var total = Number(v.total_amount);
+      if (!isFinite(total) || total <= 0) return '';
+      var pif = generatePayments({ type: 'pif', start_date: debut, total_amount: total });
+      return '1 paiement de ' + F.moneyExact(pif[0].amount) + ' le ' + F.dateJourMois(pif[0].due_date);
+    }
+
+    if (v.type === 'versements') {
+      var t = Number(v.total_amount);
+      var n = Number(v.installments_count);
+      if (!isFinite(t) || t <= 0) return '';
+      if (!isFinite(n) || n < 1 || Math.floor(n) !== n) return '';
+      var pays = generatePayments({ type: 'versements', start_date: debut, total_amount: t, installments_count: n });
+      var base = pays[0].amount;
+      var dernier = pays[pays.length - 1].amount;
+      var texte = pays.length + ' versement' + (pays.length > 1 ? 's' : '') + ' de ' + F.moneyExact(base);
+      if (dernier !== base) texte += ' (le dernier de ' + F.moneyExact(dernier) + ')';
+      return texte + ' — total ' + F.moneyExact(sum(pays, function (p) { return p.amount; }));
+    }
+
+    if (v.type === 'abonnement') {
+      var mensuel = Number(v.monthly_amount);
+      if (!isFinite(mensuel) || mensuel <= 0) return '';
+      var abo = generatePayments({ type: 'abonnement', start_date: debut, monthly_amount: mensuel });
+      return F.moneyExact(abo[0].amount) + ' le ' + Number(debut.slice(8, 10)) +
+        ' de chaque mois à partir du ' + F.dateJourMois(debut);
+    }
+
+    return '';
+  }
+
   /* ---------- export CSV (séparateur ; et virgule décimale : Excel français) ---------- */
 
   function csvCell(v) {
@@ -664,6 +1054,49 @@
 
   function vente(db, id) {
     return vivants(db.sales).find(function (x) { return x.id === id; });
+  }
+
+  /* Sections « associés » communes aux deux exports : les versements réels, le
+     solde dû de chacun, puis son relevé complet. Elles s'ajoutent APRÈS le
+     contenu existant et ne modifient aucune ligne ni aucun total déjà exporté —
+     un export qu'on relit d'une année sur l'autre ne doit pas changer de forme
+     en dessous de la ligne où on l'avait laissé.
+     Les versements sont listés du plus ancien au plus récent, comme le reste de
+     l'export : dans un tableur, on lit une colonne de dates dans un seul sens. */
+  function csvSectionsAssocies(db, debut, fin, today) {
+    var b = bilan(db, debut, fin, today);
+    var rows = [];
+
+    rows.push([]);
+    rows.push(['VERSEMENTS AUX ASSOCIÉS']);
+    rows.push(['Date', 'Associé', 'Montant', 'Note', 'Ajouté par']);
+    b.versements.slice().sort(function (x, y) { return compareDates(x.date, y.date); })
+      .forEach(function (v) {
+        rows.push([v.date, nomAssocie(db, v.partner), csvMontant(v.amount),
+          v.note || '', identite(db, v.created_by)]);
+      });
+
+    rows.push([]);
+    rows.push(['SOLDE PAR ASSOCIÉ']);
+    // « sur encaissé » : ce n'est PAS le même chiffre que la part du tableau
+    // mensuel, calculée sur l'attendu. Les deux sont justes, ils ne répondent
+    // pas à la même question — l'étiquette doit le dire.
+    rows.push(['Associé', 'Part gagnée (sur encaissé)', 'Part versée', 'Solde dû']);
+    ['a', 'b'].forEach(function (k) {
+      var p = b.partenaires[k];
+      rows.push([nomAssocie(db, k), csvMontant(p.gagne), csvMontant(p.verse), csvMontant(p.solde)]);
+    });
+
+    ['a', 'b'].forEach(function (k) {
+      rows.push([]);
+      rows.push(['RELEVÉ (sur encaissé) — ' + nomAssocie(db, k)]);
+      rows.push(['Date', 'Libellé', 'Montant', 'Solde']);
+      ledger(db, k, debut, fin, today).forEach(function (l) {
+        rows.push([l.date, l.libelle, csvMontant(l.montant), csvMontant(l.solde)]);
+      });
+    });
+
+    return rows;
   }
 
   /* CSV d'un mois : revenus détaillés + dépenses détaillées + totaux. */
@@ -708,8 +1141,13 @@
     rows.push(['Profit net', csvMontant(s.profit)]);
     rows.push(['Marge (%)', csvMontant(s.marge)]);
     rows.push(['ROAS', s.roas == null ? '' : csvMontant(s.roas)]);
-    rows.push(['Part ' + (st.partner_a_name || 'Steph') + ' (' + s.split.pctA + ' %)', csvMontant(s.split.a)]);
-    rows.push(['Part ' + (st.partner_b_name || 'Alex') + ' (' + s.split.pctB + ' %)', csvMontant(s.split.b)]);
+    // « sur attendu » : ces deux lignes partagent le profit ATTENDU, alors que la
+    // section SOLDE PAR ASSOCIÉ, plus bas dans le MÊME fichier, partage l'ENCAISSÉ.
+    // Deux chiffres justes qui ne répondent pas à la même question : sans la base
+    // dans l'étiquette, le lecteur doit deviner lequel est « sa part ».
+    rows.push(['Part ' + (st.partner_a_name || 'Steph') + ' (' + s.split.pctA + ' %, sur attendu)', csvMontant(s.split.a)]);
+    rows.push(['Part ' + (st.partner_b_name || 'Alex') + ' (' + s.split.pctB + ' %, sur attendu)', csvMontant(s.split.b)]);
+    rows = rows.concat(csvSectionsAssocies(db, mk + '-01', lastDayOfMonth(mk), today));
     return csvLignes(rows);
   }
 
@@ -722,7 +1160,11 @@
     rows.push([]);
     rows.push(['Mois', 'Revenus', 'Encaissé', 'À récupérer', 'Ads', 'Dépenses récurrentes',
       'Dépenses ponctuelles', 'Dépenses totales', 'Profit net',
-      'Part ' + (st.partner_a_name || 'Steph'), 'Part ' + (st.partner_b_name || 'Alex'), 'ROAS']);
+      // « sur attendu » dans l'en-tête : le même fichier contient plus bas des parts
+      // calculées sur l'ENCAISSÉ. Sans la base, deux chiffres différents portent le
+      // même nom et le lecteur doit deviner lequel est « sa part ».
+      'Part ' + (st.partner_a_name || 'Steph') + ' (sur attendu)',
+      'Part ' + (st.partner_b_name || 'Alex') + ' (sur attendu)', 'ROAS']);
     var tot = { r: 0, e: 0, ar: 0, ads: 0, rec: 0, po: 0, dep: 0, p: 0, a: 0, b: 0 };
     for (var m = 1; m <= 12; m++) {
       var mk = annee + '-' + pad2(m);
@@ -738,6 +1180,8 @@
     rows.push(['TOTAL', csvMontant(tot.r), csvMontant(tot.e), csvMontant(tot.ar), csvMontant(tot.ads),
       csvMontant(tot.rec), csvMontant(tot.po), csvMontant(tot.dep), csvMontant(tot.p),
       csvMontant(tot.a), csvMontant(tot.b), tot.ads > 0 ? csvMontant(round2(tot.r / tot.ads)) : '']);
+    var per = periodeAnnee(annee);
+    rows = rows.concat(csvSectionsAssocies(db, per.debut, per.fin, today));
     return csvLignes(rows);
   }
 
@@ -763,11 +1207,24 @@
     saleTotal: saleTotal,
     identite: identite,
     saleLabel: saleLabel,
+    paiementsActifs: paiementsActifs,
     paymentsOfMonth: paymentsOfMonth,
     adSpendOfMonth: adSpendOfMonth,
     recurringOfMonth: recurringOfMonth,
     oneOffOfMonth: oneOffOfMonth,
+    payoutsOfPeriod: payoutsOfPeriod,
+    nomAssocie: nomAssocie,
+    periodeDepuisLeDebut: periodeDepuisLeDebut,
+    periodeAnnee: periodeAnnee,
+    moisDeLaPeriode: moisDeLaPeriode,
+    bilan: bilan,
+    ledger: ledger,
+    normaliserNom: normaliserNom,
+    clientsSimilaires: clientsSimilaires,
+    impactSuppression: impactSuppression,
+    apercuVente: apercuVente,
     splitProfit: splitProfit,
+    splitPctForMonth: splitPctForMonth,
     monthSummary: monthSummary,
     clientsActifsDuMois: clientsActifsDuMois,
     newClientsInMonth: newClientsInMonth,

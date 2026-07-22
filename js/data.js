@@ -150,7 +150,8 @@
     return email;
   }
 
-  var TABLES_DONNEES = ['clients', 'sales', 'payments', 'ad_spend', 'recurring_expenses', 'one_off_expenses'];
+  var TABLES_DONNEES = ['clients', 'sales', 'payments', 'ad_spend', 'recurring_expenses',
+    'one_off_expenses', 'payouts'];
 
   /* La vue que consulte l'interface : les lignes supprimées (deleted_at posé)
      n'existent plus pour aucun écran ni aucun calcul. etat.db, lui, garde TOUT :
@@ -172,6 +173,7 @@
     TABLES_DONNEES.forEach(function (t) { if (!etat.db[t]) etat.db[t] = []; });
     if (!etat.db.settings) etat.db.settings = { split_a_pct: 50, daily_ad_budget: 120 };
     if (!etat.db.settings.monthly_goal_overrides) etat.db.settings.monthly_goal_overrides = {};
+    if (!etat.db.settings.split_history) etat.db.settings.split_history = {};
     await ensurePayments(C.addMonths(C.monthKey(C.todayISO()), 3));
     return etat.db;
   }
@@ -263,23 +265,39 @@
     return row;
   }
 
-  /* Archiver une vente : on la retire de la vue et ses paiements non payés à
-     venir partent à la Corbeille (rien n'est effacé pour de bon). L'historique
-     déjà encaissé est conservé. */
+  /* Archiver une vente = la retirer des vues courantes SANS toucher à ses lignes.
+     Les paiements non payés de cette vente cessent d'être comptés partout, parce
+     que le cœur de calcul les ignore dès que leur vente (ou leur client) est
+     archivée — voir paiementsActifs() dans calc.js. Les paiements DÉJÀ PAYÉS
+     restent, eux : cet argent est vraiment entré, l'historique ne bouge pas.
+
+     C'est volontairement un filtre de calcul et non une suppression de lignes :
+     une base déjà polluée (des ventes archivées dont les paiements étaient
+     restés) se remet d'aplomb au premier chargement, sans rien effacer. */
   async function archiveSale(id) {
-    var today = C.todayISO();
     await etat.backend.update('sales', id, { archived: true });
     var vente = etat.db.sales.find(function (s) { return s.id === id; });
     if (vente) vente.archived = true;
+  }
 
-    var futurs = etat.db.payments.filter(function (p) {
-      return p.sale_id === id && !p.deleted_at &&
-        p.status !== 'paid' && C.compareDates(p.due_date, today) > 0;
+  /* Archiver est réversible : réactiver remet la vente dans les vues courantes,
+     et ensurePayments() reprendra la génération de ses échéances au prochain
+     chargement (il ignore les ventes archivées, pas les autres). */
+  async function reactiverSale(id) {
+    await etat.backend.update('sales', id, { archived: false });
+    var vente = etat.db.sales.find(function (s) { return s.id === id; });
+    if (vente) vente.archived = false;
+    await ensurePayments(C.addMonths(C.monthKey(C.todayISO()), 3));
+  }
+
+  /* Réactiver un client ramène aussi ses ventes archivées : elles étaient
+     parties avec lui, elles reviennent avec lui. */
+  async function reactiverClient(id) {
+    await updateClient(id, { archived: false });
+    var ventes = etat.db.sales.filter(function (s) {
+      return s.client_id === id && s.archived && !s.deleted_at;
     });
-    var quand = new Date().toISOString();
-    for (var i = 0; i < futurs.length; i++) {
-      await marquerSupprime('payments', futurs[i].id, quand);
-    }
+    for (var i = 0; i < ventes.length; i++) await reactiverSale(ventes[i].id);
   }
 
   /* Fixe le statut d'un paiement. Marquer « payé » remplit la date réelle
@@ -417,6 +435,11 @@
       return c ? c.name : '(client supprimé)';
     }
 
+    function nomPartenaire(lettre) {
+      var s = etat.db.settings || {};
+      return lettre === 'a' ? (s.partner_a_name || 'Steph') : (s.partner_b_name || 'Alex');
+    }
+
     TABLES_DONNEES.forEach(function (t) {
       etat.db[t].forEach(function (r) {
         if (!garder(t, r)) return;
@@ -425,6 +448,7 @@
         else if (t === 'sales') label = 'Vente — ' + C.saleLabel(r) + ' (' + nomClient(r.client_id) + ')';
         else if (t === 'payments') label = 'Paiement du ' + r.due_date + ' — ' + nomClient(r.client_id);
         else if (t === 'ad_spend') label = 'Ads du ' + r.day;
+        else if (t === 'payouts') label = 'Versement du ' + r.date + ' — ' + nomPartenaire(r.partner);
         else label = 'Dépense — ' + r.label;
         out.push({ table: t, row: r, label: label, quand: r.deleted_at });
       });
@@ -498,11 +522,65 @@
     await supprimer('one_off_expenses', id);
   }
 
+  /* ---------- Versements aux associés ----------
+     Un versement, c'est de l'argent que l'entreprise a REMIS à un associé sur
+     un profit déjà gagné. Ce n'est PAS une dépense : ça ne réduit ni les
+     revenus, ni le profit, ni la part de personne — sinon le profit serait
+     amputé deux fois et l'erreur se répercuterait sur tous les mois suivants.
+     Le cœur de calcul ne lit jamais db.payouts dans monthSummary(). */
+
+  async function addPayout(data) {
+    var row = await etat.backend.insert('payouts', {
+      partner: data.partner,
+      date: data.date,
+      amount: Number(data.amount),
+      note: data.note || null,
+      created_by: courriel()
+    });
+    etat.db.payouts.push(row);
+    return row;
+  }
+
+  /* Modification en place (la date, comme partout ailleurs, mais aussi le
+     montant, la note ou l'associé depuis la fiche du versement). */
+  async function updatePayout(id, patch) {
+    var v = etat.db.payouts.find(function (x) { return x.id === id; });
+    if (!v) return null;
+    var row = await etat.backend.update('payouts', id, patch);
+    Object.assign(v, row || patch);
+    return v;
+  }
+
+  async function deletePayout(id) {
+    await supprimer('payouts', id);
+  }
+
   /* ---------- Réglages ---------- */
 
+  /* Le pourcentage de partage peut changer avec le temps. Quand il change, on
+     GÈLE le pourcentage en vigueur sur tous les mois déjà terminés qui n'ont
+     pas encore le leur : l'histoire garde les chiffres que les associés se sont
+     réellement entendus, et le nouveau pourcentage s'applique à partir du mois
+     en cours. Sans ce gel, changer le partage réécrirait le passé. */
+  function gelerSplitPasse(ancienPct) {
+    var histo = Object.assign({}, etat.db.settings.split_history || {});
+    var periode = C.periodeDepuisLeDebut(vueVivante(), C.todayISO());
+    var moisCourant = C.monthKey(C.todayISO());
+    var mois = C.moisDeLaPeriode(C.monthKey(periode.debut), C.addMonths(moisCourant, -1));
+    mois.forEach(function (m) {
+      if (histo[m] == null) histo[m] = ancienPct;
+    });
+    return histo;
+  }
+
   async function saveSettings(patch) {
-    var row = await etat.backend.saveSettings(patch);
-    Object.assign(etat.db.settings, row || patch);
+    var p = Object.assign({}, patch);
+    var ancien = etat.db.settings.split_a_pct;
+    if (p.split_a_pct != null && Number(p.split_a_pct) !== Number(ancien)) {
+      p.split_history = gelerSplitPasse(ancien == null ? 50 : Number(ancien));
+    }
+    var row = await etat.backend.saveSettings(p);
+    Object.assign(etat.db.settings, row || p);
     return etat.db.settings;
   }
 
@@ -531,6 +609,8 @@
     archiveClient: archiveClient,
     addSale: addSale,
     archiveSale: archiveSale,
+    reactiverSale: reactiverSale,
+    reactiverClient: reactiverClient,
     setPaymentStatus: setPaymentStatus,
     cyclePayment: cyclePayment,
     relancer: relancer,
@@ -544,6 +624,9 @@
     addOneOff: addOneOff,
     updateOneOff: updateOneOff,
     deleteOneOff: deleteOneOff,
+    addPayout: addPayout,
+    updatePayout: updatePayout,
+    deletePayout: deletePayout,
     supprimer: supprimer,
     restaurer: restaurer,
     corbeille: corbeille,

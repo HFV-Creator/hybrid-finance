@@ -11,7 +11,11 @@
     chartN: 6,
     chartMode: 'attendu',   // 'attendu' ou 'encaisse' — la bascule du graphique
     simBudget: null,
-    horizon: C.addMonths(C.monthKey(C.todayISO()), 3)
+    horizon: C.addMonths(C.monthKey(C.todayISO()), 3),
+    montrerArchives: false,
+    // Le BILAN démarre sur « depuis le début » : l'entreprise a commencé avant
+    // l'application, la période par défaut doit donc couvrir tout l'historique.
+    bilanPeriode: { type: 'debut', debut: null, fin: null }
   };
 
   function db() { return D.db; }
@@ -202,11 +206,16 @@
   });
 
   function rendreVue() {
-    ['dashboard', 'traiter', 'clients', 'depenses', 'reglages'].forEach(function (v) {
+    ['dashboard', 'traiter', 'bilan', 'clients', 'depenses', 'reglages'].forEach(function (v) {
       $('#vue-' + v).hidden = (v !== etat.vue);
     });
+    // Le BILAN a son propre sélecteur de période : afficher en plus le sélecteur
+    // de mois global donnerait deux commandes de temps sur le même écran, dont
+    // une sans effet. On le retire là, et seulement là.
+    $('#month-picker').parentNode.hidden = (etat.vue === 'bilan');
     if (etat.vue === 'dashboard') rendreDashboard();
     if (etat.vue === 'traiter') rendreTraiter();
+    if (etat.vue === 'bilan') rendreBilan();
     if (etat.vue === 'clients') rendreClients();
     if (etat.vue === 'depenses') rendreDepenses();
     if (etat.vue === 'reglages') rendreReglages();
@@ -275,6 +284,14 @@
     $('#side-b').innerHTML = esc(nomB().toUpperCase()) + ' · ' + F.money(sp.b);
     $('#split-ytd').innerHTML = 'Cumul ' + ytd.annee + ' : <b>' + F.money(ytd.a) + '</b> / <b>' + F.money(ytd.b) + '</b>';
 
+    // Le compteur, tous mois confondus : ce qui reste dû à chacun aujourd'hui.
+    var perTot = C.periodeDepuisLeDebut(db(), today());
+    var bTot = C.bilan(db(), perTot.debut, perTot.fin, today());
+    $('#solde-ligne').hidden = false;
+    $('#solde-ligne').innerHTML = 'Solde à ce jour — ' +
+      morceauSolde(nomA(), bTot.partenaires.a.solde) + ' · ' +
+      morceauSolde(nomB(), bTot.partenaires.b.solde);
+
     // KPI — le gros chiffre des revenus est l'ENCAISSÉ (l'argent réellement reçu) ;
     // l'attendu du mois est affiché juste dessous. Chaque KPI dit sur quoi il repose.
     $('#kpi-rev').textContent = F.money(s.encaisse);
@@ -327,6 +344,14 @@
     rendreGraphique();
     rendreSignaux();
   }
+
+  function morceauSolde(nom, solde) {
+    if (Math.abs(solde) < 0.005) return esc(nom) + ' : à jour';
+    if (solde > 0) return esc(nom) + ' : <b>' + F.money(solde) + '</b> dû';
+    return esc(nom) + ' : <b>' + F.money(Math.abs(solde)) + '</b> versés en trop';
+  }
+
+  $('#solde-ligne').addEventListener('click', function () { allerVue('bilan'); });
 
   function delta(actuel, precedent, moisPrec, hausseEstBonne) {
     if (!precedent) return '<span class="warn">Pas de comparaison pour ' + esc(F.moisSeul(moisPrec).toLowerCase()) + '</span>';
@@ -394,6 +419,7 @@
         var patch = {};
         patch[champ] = v;
         if (table === 'payments') await D.updatePayment(id, patch);
+        else if (table === 'payouts') await D.updatePayout(id, patch);
         else await D.updateOneOff(id, patch);
         U.toast('Date modifiée : ' + F.dateCourte(v) + '.');
       }
@@ -579,31 +605,303 @@
     rendreVue();
   });
 
+  /* ================= Bilan ================= */
+
+  function nomPartenaire(lettre) { return lettre === 'a' ? nomA() : nomB(); }
+
+  /* La période affichée. « Depuis le début » part du plus ancien enregistrement
+     de la base, quel qu'il soit — l'entreprise tournait avant l'application. */
+  function periodeCourante() {
+    var p = etat.bilanPeriode;
+    if (p.type === 'annee') return C.periodeAnnee(C.monthKey(today()).slice(0, 4));
+    if (p.type === 'perso' && p.debut && p.fin && C.compareDates(p.debut, p.fin) <= 0) {
+      return { debut: p.debut, fin: p.fin };
+    }
+    return C.periodeDepuisLeDebut(db(), today());
+  }
+
+  function ligneChiffre(lab, val, opts) {
+    opts = opts || {};
+    return '<div class="bloc-chiffre' + (opts.fort ? ' fort' : '') + '">' +
+      '<span class="lab">' + esc(lab) + '</span>' +
+      '<span class="val ' + (opts.ton || '') + '"' +
+      (opts.testid ? ' data-testid="' + opts.testid + '"' : '') + '>' + esc(val) + '</span></div>';
+  }
+
+  function rendreBilan() {
+    var per = periodeCourante();
+    var b = C.bilan(db(), per.debut, per.fin, today());
+
+    $$('#bilan-periode button').forEach(function (x) {
+      x.classList.toggle('active', x.dataset.periode === etat.bilanPeriode.type);
+    });
+    // On affiche les bornes RÉELLEMENT calculées, pas celles demandées : le bilan
+    // raisonne en mois entiers (une part de profit n'existe que par mois), donc une
+    // date en milieu de mois tire tout le mois. Le dire évite un écart invisible
+    // entre ce que l'écran annonce et ce qu'il additionne.
+    $('#bilan-perso').hidden = etat.bilanPeriode.type !== 'perso';
+    if (etat.bilanPeriode.type === 'perso') {
+      $('#bilan-du').value = b.debut;
+      $('#bilan-au').value = b.fin;
+      etat.bilanPeriode.debut = b.debut;
+      etat.bilanPeriode.fin = b.fin;
+    }
+
+    $('#bilan-portee').innerHTML = 'Du <b>' + esc(F.dateLongue(b.debut)) + '</b> au <b>' +
+      esc(F.dateLongue(b.fin)) + '</b> · ' + b.mois.length + ' mois' +
+      (etat.bilanPeriode.type === 'perso'
+        ? ' <span class="sub">(le bilan compte des mois entiers)</span>'
+        : '');
+
+    // Ce que l'entreprise a fait : ces totaux sont EXACTEMENT la somme des mois
+    // affichés sur le tableau de bord, pour que les deux écrans ne se contredisent jamais.
+    $('#bilan-totaux').innerHTML =
+      '<div class="eyebrow">Ce que l\'entreprise a fait</div>' +
+      ligneChiffre('Revenus attendus', F.money(b.revenus), { testid: 'bilan-revenus' }) +
+      ligneChiffre('Revenus encaissés', F.money(b.encaisse), { testid: 'bilan-encaisse' }) +
+      ligneChiffre('Dépenses', F.money(b.depenses.total), { testid: 'bilan-depenses-total' }) +
+      ligneChiffre('Profit sur l\'attendu', F.money(b.profit), { testid: 'bilan-profit' }) +
+      ligneChiffre('Profit encaissé', F.money(b.profitEncaisse), { fort: true, testid: 'bilan-profit-encaisse' }) +
+      '<p class="aide-bloc">Les parts des associés se calculent sur le <b>profit encaissé</b> :' +
+      ' on ne partage que l\'argent réellement reçu.</p>';
+
+    var cats = b.depenses.parCategorie || {};
+    $('#bilan-depenses').innerHTML =
+      '<div class="eyebrow">Dépenses par catégorie</div>' +
+      Object.keys(C.CATEGORIES).map(function (k) {
+        return ligneChiffre(C.CATEGORIES[k], F.money(cats[k] || 0), { testid: 'bilan-cat-' + k });
+      }).join('') +
+      ligneChiffre('Total', F.money(b.depenses.total), { fort: true });
+
+    // Le solde dû : le chiffre qui domine la carte de chaque associé.
+    $('#bilan-partenaires').innerHTML = ['a', 'b'].map(function (l) {
+      return carteAssocie(l, b.partenaires[l]);
+    }).join('');
+
+    $('#bilan-releves').innerHTML = ['a', 'b'].map(function (l) {
+      return releveHtml(l, per);
+    }).join('');
+
+    rendreVersements(b);
+    rendreBilanMois(b);
+  }
+
+  function carteAssocie(lettre, p) {
+    var nom = nomPartenaire(lettre);
+    var carre = Math.abs(p.solde) < 0.005;
+    var cls = carre ? 'carre' : (p.solde > 0 ? 'du' : 'trop');
+    var quoi = carre
+      ? 'à jour — il ne reste rien à verser'
+      : (p.solde > 0
+        ? 'que l\'entreprise doit encore à ' + esc(nom)
+        : 'versés en trop à ' + esc(nom));
+    return '<div class="carte-associe ' + lettre + '">' +
+      '<div class="qui">' + esc(nom) + '</div>' +
+      '<div class="solde-big ' + cls + '" data-testid="solde-' + lettre + '">' +
+      F.money(Math.abs(p.solde)) + '</div>' +
+      '<div class="solde-quoi">' + quoi + '</div>' +
+      ligneChiffre('Part gagnée', F.money(p.gagne), { testid: 'gagne-' + lettre }) +
+      ligneChiffre('Part versée', F.money(p.verse), { testid: 'verse-' + lettre }) +
+      '</div>';
+  }
+
+  /* Le compteur : un mouvement par ligne, et le solde après chacun.
+     C'est la colonne « Solde » que l'œil suit — la dernière valeur est
+     exactement le solde dû affiché plus haut. */
+  function releveHtml(lettre, per) {
+    var lignes = C.ledger(db(), lettre, per.debut, per.fin, today());
+    if (!lignes.length) {
+      return '<div class="releve"><div class="releve-titre">' + esc(nomPartenaire(lettre)) + '</div>' +
+        '<div class="card"><p class="empty">Aucun mouvement sur cette période.</p></div></div>';
+    }
+    return '<div class="releve"><div class="releve-titre">' + esc(nomPartenaire(lettre)) + '</div>' +
+      '<div class="card"><div class="table-scroll"><table>' +
+      '<thead><tr><th>Date</th><th>Mouvement</th><th class="right">Montant</th><th class="right">Solde</th></tr></thead>' +
+      '<tbody data-testid="releve-' + lettre + '">' +
+      lignes.map(function (l) {
+        var positif = l.montant >= 0;
+        return '<tr class="' + (l.type === 'versement' ? 'ligne-versement' : '') + '">' +
+          '<td class="sub">' + esc(F.dateCourte(l.date)) + '</td>' +
+          '<td>' + esc(l.libelle) + '</td>' +
+          '<td class="money"><span class="' + (positif ? 'mvt-plus' : 'mvt-moins') + '">' +
+          (positif ? '+ ' : '− ') + F.money(Math.abs(l.montant)) + '</span></td>' +
+          '<td class="solde-col">' + F.money(l.solde) + '</td></tr>';
+      }).join('') +
+      '</tbody></table></div></div></div>';
+  }
+
+  function rendreVersements(b) {
+    var vs = b.versements;
+    $('#versements-body').innerHTML = vs.length ? vs.map(function (v) {
+      return '<tr><td class="sub">' + dateEditable('payouts', v.id, 'date', v.date) + '</td>' +
+        '<td>' + esc(nomPartenaire(v.partner)) + '</td>' +
+        '<td class="money">' + F.money(v.amount) + '</td>' +
+        '<td class="sub">' + esc(v.note || '—') + '</td>' +
+        '<td class="sub">' + esc(D.identite(v.created_by)) + '</td>' +
+        '<td><div class="row-actions">' +
+        '<button class="btn-mini" data-vers-editer="' + v.id + '" data-testid="vers-editer-' + v.id + '">Modifier</button>' +
+        '<button class="btn-mini danger" data-vers-suppr="' + v.id + '" data-testid="vers-suppr-' + v.id + '">Supprimer</button>' +
+        '</div></td></tr>';
+    }).join('') : '<tr><td colspan="6" class="empty">Aucun versement sur cette période. ' +
+      'Enregistre ici l\'argent que vous vous êtes réellement versé.</td></tr>';
+  }
+
+  function rendreBilanMois(b) {
+    var entete = '<table><thead><tr><th>Mois</th><th class="right">Attendu</th>' +
+      '<th class="right">Encaissé</th><th class="right">Dépenses</th>' +
+      '<th class="right">Profit encaissé</th>' +
+      // Les colonnes « Part » viennent du profit ENCAISSÉ, comme les cartes de
+      // solde plus haut — l'en-tête le dit, pour qu'aucune colonne ne laisse
+      // deviner sa base de calcul.
+      '<th class="right">Part ' + esc(nomA()) + ' (encaissé)</th>' +
+      '<th class="right">Part ' + esc(nomB()) + ' (encaissé)</th>' +
+      '<th class="right">Versé ' + esc(nomA()) + '</th><th class="right">Versé ' + esc(nomB()) + '</th></tr></thead>';
+    var corps = b.parMois.map(function (m) {
+      return '<tr><td class="sub">' + esc(F.moisAnnee(m.month + '-01')) + '</td>' +
+        '<td class="money">' + F.money(m.revenue) + '</td>' +
+        '<td class="money">' + F.money(m.encaisse) + '</td>' +
+        '<td class="money">' + F.money(m.depenses) + '</td>' +
+        '<td class="money">' + F.money(m.profitEncaisse) + '</td>' +
+        '<td class="money">' + F.money(m.partA) + '</td>' +
+        '<td class="money">' + F.money(m.partB) + '</td>' +
+        '<td class="money">' + F.money(m.verseA) + '</td>' +
+        '<td class="money">' + F.money(m.verseB) + '</td></tr>';
+    }).join('');
+    $('#bilan-mois').innerHTML = entete + '<tbody data-testid="bilan-mois-body">' + corps + '</tbody></table>';
+  }
+
+  $('#bilan-periode').addEventListener('click', function (e) {
+    var b = e.target.closest('button');
+    if (!b) return;
+    etat.bilanPeriode.type = b.dataset.periode;
+    if (b.dataset.periode === 'perso' && !etat.bilanPeriode.debut) {
+      var def = C.periodeDepuisLeDebut(db(), today());
+      etat.bilanPeriode.debut = def.debut;
+      etat.bilanPeriode.fin = def.fin;
+    }
+    rendreBilan();
+  });
+
+  ['#bilan-du', '#bilan-au'].forEach(function (sel) {
+    $(sel).addEventListener('change', function () {
+      var du = $('#bilan-du').value, au = $('#bilan-au').value;
+      if (!du || !au) return;
+      if (C.compareDates(du, au) > 0) { U.toast('La date de fin doit venir après la date de début.', true); return; }
+      etat.bilanPeriode.debut = du;
+      etat.bilanPeriode.fin = au;
+      rendreBilan();
+    });
+  });
+
+  /* ---------- Versements ---------- */
+
+  function modaleVersement(existant) {
+    var titre = existant ? 'Modifier le versement' : 'Enregistrer un versement';
+    var html =
+      '<label class="field"><span>Associé payé</span>' +
+      '<select data-champ="partner" data-testid="f-vers-partner">' +
+      '<option value="a">' + esc(nomA()) + '</option>' +
+      '<option value="b">' + esc(nomB()) + '</option></select></label>' +
+      '<div class="form-row">' +
+      '<label class="field"><span>Montant versé ($)</span>' +
+      '<input type="number" step="0.01" min="0" data-champ="montant" data-testid="f-vers-montant"></label>' +
+      '<label class="field"><span>Date du versement</span>' +
+      '<input type="date" data-champ="date" data-testid="f-vers-date"></label>' +
+      '</div>' +
+      '<label class="field"><span>Note (facultatif)</span>' +
+      '<input type="text" data-champ="note" data-testid="f-vers-note" placeholder="Ex. Virement Interac"></label>' +
+      '<p class="aide-bloc">Ce n\'est pas une dépense : un versement distribue un profit déjà gagné. ' +
+      'Le profit, les dépenses et les parts ne bougent pas — seul le solde dû à l\'associé baisse.</p>';
+
+    var m = U.modal(titre, existant ? '' : 'L\'argent réellement sorti vers un associé.', html, {
+      valider: existant ? 'Enregistrer' : 'Enregistrer le versement',
+      onSubmit: async function (form, close, erreur) {
+        var montant = Number(form.querySelector('[data-champ="montant"]').value);
+        var date = form.querySelector('[data-champ="date"]').value;
+        var partner = form.querySelector('[data-champ="partner"]').value;
+        var note = form.querySelector('[data-champ="note"]').value.trim();
+        if (!(montant > 0)) return erreur('Le montant versé doit être supérieur à 0.');
+        if (!date) return erreur('Choisis la date du versement.');
+        if (existant) await D.updatePayout(existant.id, { partner: partner, date: date, amount: montant, note: note || null });
+        else await D.addPayout({ partner: partner, date: date, amount: montant, note: note || null });
+        close();
+        U.toast(existant ? 'Versement modifié.' : 'Versement enregistré.');
+        rendreVue();
+      }
+    });
+
+    $('[data-champ="date"]', m.root).value = existant ? existant.date : today();
+    if (existant) {
+      $('[data-champ="partner"]', m.root).value = existant.partner;
+      $('[data-champ="montant"]', m.root).value = existant.amount;
+      $('[data-champ="note"]', m.root).value = existant.note || '';
+    }
+  }
+
+  $('#btn-add-versement').addEventListener('click', function () { modaleVersement(null); });
+
+  doc_on('click', '[data-vers-editer]', function (b) {
+    var v = db().payouts.find(function (x) { return x.id === b.dataset.versEditer; });
+    if (v) modaleVersement(v);
+  });
+
+  doc_on('click', '[data-vers-suppr]', function (b) {
+    var v = db().payouts.find(function (x) { return x.id === b.dataset.versSuppr; });
+    if (!v) return;
+    U.confirmer('Supprimer ce versement ?',
+      'Le versement de ' + F.money(v.amount) + ' à ' + nomPartenaire(v.partner) +
+      ' part à la Corbeille. Le solde dû remontera d\'autant. Récupérable 30 jours.',
+      async function () {
+        await D.deletePayout(v.id);
+        U.toast('Versement envoyé à la Corbeille.');
+        rendreVue();
+      });
+  });
+
   /* ================= Clients & ventes ================= */
 
   function rendreClients() {
-    var actifs = db().clients.filter(function (c) { return !c.archived; });
+    var tous = db().clients;
+    var actifs = tous.filter(function (c) { return !c.archived; });
+    var archives = tous.filter(function (c) { return c.archived; });
     $('#clients-hint').textContent = actifs.length + ' client' + (actifs.length > 1 ? 's' : '') + ' au dossier';
 
+    // Archiver est réversible : on peut revoir les archivés et les réactiver.
+    var btnArch = $('#btn-archives');
+    var nbArchives = archives.length +
+      db().sales.filter(function (s) { return s.archived && !s.deleted_at; }).length;
+    btnArch.hidden = nbArchives === 0;
+    btnArch.textContent = etat.montrerArchives
+      ? 'Masquer les archivés'
+      : 'Afficher les archivés (' + nbArchives + ')';
+
     var lignes = [];
-    actifs.forEach(function (c) {
-      var ventes = db().sales.filter(function (s) { return s.client_id === c.id && !s.archived; });
+    var visibles = etat.montrerArchives ? tous : actifs;
+    visibles.forEach(function (c) {
+      var ventes = db().sales.filter(function (s) {
+        return s.client_id === c.id && (etat.montrerArchives || !s.archived);
+      });
+      var marqueClient = c.archived ? ' <span class="pill neutre">Archivé</span>' : '';
       if (!ventes.length) {
-        lignes.push('<tr><td>' + lienClient(c.id) + '</td><td class="sub">Aucune vente</td><td class="money">—</td>' +
+        lignes.push('<tr><td>' + lienClient(c.id) + marqueClient + '</td><td class="sub">Aucune vente</td><td class="money">—</td>' +
           '<td class="sub">—</td><td class="sub">' + esc(D.identite(c.created_by)) + '</td>' +
           '<td><div class="row-actions">' + boutonsClient(c) + '</div></td></tr>');
         return;
       }
       ventes.forEach(function (v, i) {
-        lignes.push('<tr><td>' + (i === 0 ? lienClient(c.id) : '<span class="sub">↳</span>') + '</td>' +
-          '<td>' + esc(C.saleLabel(v)) + '<br><span class="sub">' + esc(C.TYPES_VENTE[v.type]) +
+        lignes.push('<tr><td>' + (i === 0 ? lienClient(c.id) + marqueClient : '<span class="sub">↳</span>') + '</td>' +
+          '<td>' + esc(C.saleLabel(v)) +
+          (v.archived ? ' <span class="pill neutre">Archivée</span>' : '') +
+          '<br><span class="sub">' + esc(C.TYPES_VENTE[v.type]) +
           (v.end_date ? ' · fin ' + F.dateCourte(v.end_date) : '') + '</span></td>' +
           '<td class="money">' + F.money(C.saleTotal(v)) + (v.type === 'abonnement' ? ' <span class="sub">/mois</span>' : '') + '</td>' +
           '<td class="sub">' + F.dateCourte(v.start_date) + '</td>' +
           '<td class="sub">' + esc(D.identite(v.created_by)) + '</td>' +
           '<td><div class="row-actions">' +
-          '<button class="btn-mini danger" data-archiver-vente="' + v.id + '">Archiver la vente</button>' +
-          '<button class="btn-mini danger" data-suppr-vente="' + v.id + '" data-testid="suppr-vente-' + v.id + '">Supprimer la vente</button>' +
+          (v.archived
+            ? '<button class="btn-mini" data-reactiver-vente="' + v.id + '" data-testid="reactiver-vente-' + v.id + '">Réactiver</button>'
+            : '<button class="btn-mini" data-archiver-vente="' + v.id + '" title="Retire la vente des vues courantes. L\'historique payé reste compté.">Archiver</button>') +
+          '<button class="btn-mini danger" data-suppr-vente="' + v.id + '" data-testid="suppr-vente-' + v.id + '" title="Efface la vente et tous ses paiements, passés compris.">Supprimer</button>' +
           (i === 0 ? boutonsClient(c) : '') +
           '</div></td></tr>');
       });
@@ -629,12 +927,37 @@
       esc(F.moisLong(etat.mois).toLowerCase()) + '.</td></tr>';
   }
 
+  /* Archiver et Supprimer sont deux gestes différents, et l'infobulle le dit :
+     archiver range un client qui est parti (l'historique compte toujours),
+     supprimer efface une saisie erronée (tout disparaît des totaux). */
   function boutonsClient(c) {
+    if (c.archived) {
+      return '<button class="btn-mini" data-reactiver-client="' + c.id + '" data-testid="reactiver-client-' + c.id + '">Réactiver</button>' +
+        '<button class="btn-mini danger" data-suppr-client="' + c.id + '" data-testid="suppr-client-' + c.id + '">Supprimer</button>';
+    }
     return '<button class="btn-mini" data-vente-pour="' + c.id + '">+ Vente</button>' +
       '<button class="btn-mini" data-editer-client="' + c.id + '">Modifier</button>' +
-      '<button class="btn-mini danger" data-archiver-client="' + c.id + '">Archiver</button>' +
-      '<button class="btn-mini danger" data-suppr-client="' + c.id + '" data-testid="suppr-client-' + c.id + '">Supprimer</button>';
+      '<button class="btn-mini" data-archiver-client="' + c.id + '" title="Le client sort des vues courantes. Tout son historique reste compté.">Archiver</button>' +
+      '<button class="btn-mini danger" data-suppr-client="' + c.id + '" data-testid="suppr-client-' + c.id + '" title="Efface le client, ses ventes et ses paiements de tous les totaux, passés compris.">Supprimer</button>';
   }
+
+  $('#btn-archives').addEventListener('click', function () {
+    etat.montrerArchives = !etat.montrerArchives;
+    rendreVue();
+  });
+
+  doc_on('click', '[data-reactiver-client]', async function (b) {
+    var id = b.dataset.reactiverClient;
+    await D.reactiverClient(id);
+    U.toast('Client réactivé, avec ses ventes.');
+    rendreVue();
+  });
+
+  doc_on('click', '[data-reactiver-vente]', async function (b) {
+    await D.reactiverSale(b.dataset.reactiverVente);
+    U.toast('Vente réactivée : ses prochaines échéances repartent.');
+    rendreVue();
+  });
 
   /* ---------- Fiche client ---------- */
 
@@ -742,7 +1065,9 @@
 
       '<div data-bloc="versements" hidden>' +
       '<div class="form-row">' +
-      '<label class="field"><span>Montant total ($)</span><input type="number" step="0.01" min="0" data-champ="vers-total" data-testid="f-vers-total"></label>' +
+      '<label class="field"><span>Montant TOTAL du plan ($)</span>' +
+      '<input type="number" step="0.01" min="0" data-champ="vers-total" data-testid="f-vers-total">' +
+      '<span class="aide">Le total du plan, pas le montant par mois : il sera divisé par le nombre de versements.</span></label>' +
       '<label class="field"><span>Nombre de versements</span><input type="number" step="1" min="2" max="36" value="3" data-champ="vers-n" data-testid="f-vers-n"></label>' +
       '</div>' +
       '<label class="field"><span>Date du 1<sup>er</sup> versement</span><input type="date" data-champ="vers-date" data-testid="f-vers-date">' +
@@ -757,6 +1082,9 @@
       '<label class="field"><span>Date de fin (facultatif)</span><input type="date" data-champ="abo-fin" data-testid="f-abo-fin">' +
       '<span class="aide">Laisse vide si l\'abonnement continue indéfiniment.</span></label>' +
       '</div>' +
+
+      // Aperçu vivant du plan : ce qui sera créé, à mesure que l'utilisateur tape.
+      '<div class="apercu" data-apercu data-testid="apercu-vente" hidden></div>' +
 
       // Aperçu rétroactif : apparaît dès que la date choisie crée des échéances passées.
       '<div class="retro-note" data-retro data-testid="retro-preview" hidden>' +
@@ -799,6 +1127,17 @@
           }
         }
 
+        // Garde-fou des doublons : « Ève Conte » et « Eve Conte » ont déjà été
+        // créés comme deux clients distincts. On avertit sans bloquer — deux
+        // personnes peuvent vraiment porter le même nom.
+        if (!cid) {
+          var similaires = C.clientsSimilaires(db(), v('nom'));
+          if (similaires.length && !form.dataset.doublonAccepte) {
+            avertirDoublon(form, similaires[0]);
+            return;
+          }
+        }
+
         try {
           if (!cid) {
             var c = await D.addClient({ name: v('nom'), notes: v('notes') });
@@ -832,33 +1171,52 @@
       if (!b) return;
       $$('button', seg).forEach(function (x) { x.classList.toggle('active', x === b); });
       majBlocs();
+      majApercu();
       majRetro();
     });
     $('[data-champ="client"]', m.root).addEventListener('change', function (e) {
       $('[data-bloc="nouveau"]', m.root).hidden = !!e.target.value;
     });
 
+    /* La vente telle qu'elle serait créée avec ce qui est saisi en ce moment. */
+    function venteSaisie() {
+      var v = function (n) { var el = m.root.querySelector('[data-champ="' + n + '"]'); return el ? el.value.trim() : ''; };
+      var t = $('button.active', seg).dataset.type;
+      if (t === 'pif' && v('pif-date')) {
+        return { type: 'pif', total_amount: Number(v('pif-montant')) || 0, start_date: v('pif-date') };
+      }
+      if (t === 'versements' && v('vers-date')) {
+        return {
+          type: 'versements', total_amount: Number(v('vers-total')) || 0,
+          installments_count: Number(v('vers-n')) || 2, start_date: v('vers-date')
+        };
+      }
+      if (t === 'abonnement' && v('abo-debut')) {
+        return {
+          type: 'abonnement', monthly_amount: Number(v('abo-montant')) || 0,
+          start_date: v('abo-debut'), end_date: v('abo-fin') || null
+        };
+      }
+      return null;
+    }
+
+    /* Aperçu vivant : dire AVANT d'enregistrer ce que le plan va produire.
+       Un associé a saisi 700 en pensant « 700 par mois », a vu 233,33 $ et a
+       conclu que le calcul était cassé — l'aperçu répond à ça pendant la frappe. */
+    function majApercu() {
+      var boite = $('[data-apercu]', m.root);
+      var essai = venteSaisie();
+      var texte = essai ? C.apercuVente(essai) : '';
+      boite.hidden = !texte;
+      if (texte) boite.innerHTML = '<b>Ce qui sera créé :</b> ' + esc(texte);
+    }
+
     /* Aperçu rétroactif : si la date de début est passée, on annonce précisément
        les échéances qui seront créées, avec le choix « déjà payés / à vérifier ».
        Pas de case « rétroactif » : la date dit déjà tout. */
     function majRetro() {
       var boite = $('[data-retro]', m.root);
-      var v = function (n) { var el = m.root.querySelector('[data-champ="' + n + '"]'); return el ? el.value.trim() : ''; };
-      var t = $('button.active', seg).dataset.type;
-      var essai = null;
-      if (t === 'pif' && v('pif-date')) {
-        essai = { type: 'pif', total_amount: Number(v('pif-montant')) || 0, start_date: v('pif-date') };
-      } else if (t === 'versements' && v('vers-date')) {
-        essai = {
-          type: 'versements', total_amount: Number(v('vers-total')) || 0,
-          installments_count: Number(v('vers-n')) || 2, start_date: v('vers-date')
-        };
-      } else if (t === 'abonnement' && v('abo-debut')) {
-        essai = {
-          type: 'abonnement', monthly_amount: Number(v('abo-montant')) || 0,
-          start_date: v('abo-debut'), end_date: v('abo-fin') || null
-        };
-      }
+      var essai = venteSaisie();
       if (!essai || C.compareDates(essai.start_date, today()) >= 0) { boite.hidden = true; return; }
 
       var horizon = C.addMonths(C.monthKey(today()), 3);
@@ -874,7 +1232,7 @@
         (passes.length > 1 ? ' seront créés' : ' sera créé') + '</b> : ' + esc(affiche);
       boite.hidden = false;
     }
-    m.root.querySelector('form').addEventListener('input', majRetro);
+    m.root.querySelector('form').addEventListener('input', function () { majApercu(); majRetro(); });
 
     // valeurs par défaut : aujourd'hui, et le dernier montant saisi
     ['pif-date', 'vers-date', 'abo-debut'].forEach(function (n) {
@@ -886,7 +1244,39 @@
       });
     }
     majBlocs();
+    majApercu();
     majRetro();
+  }
+
+  /* L'avertissement de doublon s'insère dans le formulaire lui-même, au-dessus
+     des boutons : impossible de le manquer, et il laisse les deux issues
+     ouvertes — reprendre le client existant, ou créer quand même. */
+  function avertirDoublon(form, existant) {
+    var ancien = form.querySelector('[data-doublon]');
+    if (ancien) ancien.remove();
+    var boite = root.document.createElement('div');
+    boite.className = 'doublon';
+    boite.setAttribute('data-doublon', '');
+    boite.setAttribute('data-testid', 'doublon');
+    boite.innerHTML = '<b>' + esc(existant.name) + '</b> existe déjà dans tes clients. ' +
+      'Est-ce la même personne ?' +
+      '<div class="actions">' +
+      '<button type="button" class="btn-mini" data-doublon-utiliser data-testid="doublon-utiliser">Oui, utiliser ' + esc(existant.name) + '</button>' +
+      '<button type="button" class="btn-mini" data-doublon-forcer data-testid="doublon-forcer">Non, créer quand même</button>' +
+      '</div>';
+    form.querySelector('.modal-actions').insertAdjacentElement('beforebegin', boite);
+
+    boite.querySelector('[data-doublon-utiliser]').addEventListener('click', function () {
+      form.querySelector('[data-champ="client"]').value = existant.id;
+      form.querySelector('[data-bloc="nouveau"]').hidden = true;
+      boite.remove();
+      U.toast('Vente rattachée à ' + existant.name + '.');
+    });
+    boite.querySelector('[data-doublon-forcer]').addEventListener('click', function () {
+      form.dataset.doublonAccepte = '1';
+      boite.remove();
+      form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    });
   }
 
   $('#btn-add-client').addEventListener('click', function () { modaleClientVente(null); });
@@ -914,32 +1304,66 @@
   doc_on('click', '[data-archiver-client]', function (b) {
     var c = db().clients.find(function (x) { return x.id === b.dataset.archiverClient; });
     U.confirmer('Archiver ' + c.name + ' ?',
-      'Le client disparaît des listes. Les paiements déjà encaissés restent dans l\'historique ; les paiements à venir non payés sont supprimés.',
+      'Pour un client qui a quitté. Il sort des listes courantes, mais tout ce qu\'il a payé ' +
+      'reste dans l\'historique et continue de compter dans les mois passés. Ses paiements non ' +
+      'payés cessent d\'être attendus, et aucun nouveau ne sera généré. Réversible : « Afficher les archivés ».',
       async function () {
         await D.archiveClient(c.id);
-        U.toast('Client archivé.');
+        U.toast('Client archivé. Son historique payé reste compté.');
         rendreVue();
       });
   });
 
   doc_on('click', '[data-archiver-vente]', function (b) {
     U.confirmer('Archiver cette vente ?',
-      'Les paiements à venir non payés partent à la Corbeille. L\'historique encaissé est conservé.',
+      'Pour un plan terminé ou remplacé. Les paiements déjà encaissés restent comptés dans leur mois ; ' +
+      'ses paiements non payés cessent d\'être attendus et n\'apparaissent plus nulle part. ' +
+      'Réversible : « Afficher les archivés ».',
       async function () {
         await D.archiveSale(b.dataset.archiverVente);
-        U.toast('Vente archivée.');
+        U.toast('Vente archivée. Ses échéances impayées ne sont plus comptées.');
         rendreVue();
       });
   });
 
   /* ---------- Suppression douce : tout passe par la Corbeille ---------- */
 
+  /* Supprimer n'est pas archiver. On annonce les conséquences EXACTES, avec les
+     vrais chiffres, avant de toucher à quoi que ce soit — et c'est « Annuler »
+     qui garde le focus. */
+  function listeMois(mois) {
+    if (mois.length > 4) return mois.length + ' mois';
+    var memeAnnee = mois.every(function (m) { return m.slice(0, 4) === mois[0].slice(0, 4); });
+    var noms = mois.map(function (m) {
+      return memeAnnee ? F.moisSeul(m).toLowerCase() : F.moisAnnee(m + '-01');
+    });
+    if (noms.length === 1) return noms[0];
+    return noms.slice(0, -1).join(', ') + ' et ' + noms[noms.length - 1];
+  }
+
+  function texteSuppression(table, id, nom) {
+    var im = C.impactSuppression(db(), table, id);
+    var bouts = [];
+    if (im.nbVentes) bouts.push('<b>' + im.nbVentes + ' vente' + (im.nbVentes > 1 ? 's' : '') + '</b>');
+    bouts.push('<b>' + im.nbPaiements + ' paiement' + (im.nbPaiements > 1 ? 's' : '') + '</b>');
+    var txt = 'Supprimer ' + esc(nom) + ' effacera ' + bouts.join(' et ');
+    if (im.montantEncaisse > 0) {
+      txt += ', dont <b>' + F.money(im.montantEncaisse) + ' déjà encaissés</b>';
+    }
+    txt += '.';
+    if (im.mois.length) {
+      txt += ' Les revenus de ' + esc(listeMois(im.mois)) + ' vont baisser.';
+    }
+    txt += ' Récupérable 30 jours dans la Corbeille.';
+    return txt;
+  }
+
   doc_on('click', '[data-suppr-client]', function (b) {
     var c = db().clients.find(function (x) { return x.id === b.dataset.supprClient; });
     if (!c) return;
-    U.confirmer('Supprimer ' + c.name + ' ?',
-      'Le client, ses ventes et tous ses paiements partent à la Corbeille. ' +
-      'Tu peux tout restaurer pendant 30 jours, depuis l\'écran Réglages.',
+    U.confirmerDanger('Supprimer ' + c.name + ' ?',
+      texteSuppression('clients', c.id, c.name),
+      'Supprimer définitivement',
       async function () {
         await D.supprimer('clients', c.id);
         U.toast('Client envoyé à la Corbeille (restaurable 30 jours).');
@@ -948,11 +1372,13 @@
   });
 
   doc_on('click', '[data-suppr-vente]', function (b) {
-    U.confirmer('Supprimer cette vente ?',
-      'La vente et tous ses paiements partent à la Corbeille. ' +
-      'Tu peux tout restaurer pendant 30 jours, depuis l\'écran Réglages.',
+    var v = db().sales.find(function (x) { return x.id === b.dataset.supprVente; });
+    if (!v) return;
+    U.confirmerDanger('Supprimer cette vente ?',
+      texteSuppression('sales', v.id, 'la vente « ' + C.saleLabel(v) + ' » de ' + nomClient(v.client_id)),
+      'Supprimer définitivement',
       async function () {
-        await D.supprimer('sales', b.dataset.supprVente);
+        await D.supprimer('sales', v.id);
         U.toast('Vente envoyée à la Corbeille (restaurable 30 jours).');
         rendreVue();
       });

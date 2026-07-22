@@ -5,7 +5,12 @@
   'use strict';
 
   var TABLES = ['settings', 'clients', 'sales', 'payments', 'ad_spend',
-    'recurring_expenses', 'one_off_expenses'];
+    'recurring_expenses', 'one_off_expenses', 'payouts'];
+
+  /* Les tables apparues avec une mise à jour : si SEULES celles-là manquent, la
+     base est simplement en retard d'une migration — ce n'est pas une
+     installation ratée, et le diagnostic doit dire autre chose. */
+  var TABLES_V2B = { payouts: true };
 
   var PAGE = 1000;   // Supabase renvoie au maximum 1000 lignes par requête
 
@@ -131,7 +136,15 @@
             if (r.error && classer(r.error) === 'table_absente') manquantes.push(TABLES[i]);
           }
           if (manquantes.length) {
-            problems.push({
+            // Une table ajoutée par une mise à jour manque = la base n'a pas encore
+            // reçu cette mise à jour. Surtout PAS le message « refais schema.sql » :
+            // sur une base déjà installée, « create table if not exists settings »
+            // ne rajouterait aucune colonne, et l'utilisateur tournerait en rond.
+            var deLaV2b = manquantes.every(function (t) { return TABLES_V2B[t]; });
+            problems.push(deLaV2b ? {
+              what: 'La base de données n\'est pas encore à jour pour la version 2b.',
+              fix: 'Exécute le fichier <b>supabase/migration-v2b.sql</b> dans le SQL Editor de Supabase, en suivant la section <b>« Mettre la base de données à jour »</b> du guide <b>MISE-A-JOUR-V2B.md</b>. Il ne fait qu\'ajouter : tes données ne bougent pas. <b>Ne relance pas schema.sql</b> — il est fait pour une base neuve et n\'ajouterait pas ce qui manque ici.'
+            } : {
               what: 'Il manque des tables : ' + manquantes.join(', ') + '.',
               fix: 'Le fichier <b>supabase/schema.sql</b> n\'a pas été exécuté en entier. Refais la section <b>« Installer les tables (le fichier schema.sql) »</b> de la PARTIE A du guide : recopie TOUT le fichier dans le SQL Editor, puis clique Run.'
             });
@@ -156,7 +169,7 @@
       async checkReglages() {
         var res;
         try {
-          res = await sb.from('settings').select('id, monthly_goal').limit(1);
+          res = await sb.from('settings').select('id, monthly_goal, split_history').limit(1);
         } catch (e) {
           return {
             ok: false, technical: String(e && e.message || e), problems: [{
@@ -168,11 +181,17 @@
         if (res.error) {
           var codeCol = String(res.error.code || '');
           var msgCol = String(res.error.message || '');
-          if (codeCol === '42703' || /monthly_goal/.test(msgCol)) {
+          // Une colonne inconnue = la base n'a pas encore reçu la mise à jour qui
+          // l'ajoute. On nomme le bon fichier selon la colonne qui manque.
+          if (codeCol === '42703' || /monthly_goal|split_history/.test(msgCol)) {
+            var v2bSeul = /split_history/.test(msgCol) && !/monthly_goal/.test(msgCol);
             return {
-              ok: false, technical: msgCol, problems: [{
+              ok: false, technical: msgCol, problems: v2bSeul ? [{
+                what: 'La base de données n\'est pas encore à jour pour la version 2b.',
+                fix: 'Exécute le fichier <b>supabase/migration-v2b.sql</b> dans le SQL Editor de Supabase, en suivant la section <b>« Mettre la base de données à jour »</b> du guide <b>MISE-A-JOUR-V2B.md</b>. Il ne fait qu\'ajouter : tes données ne bougent pas.'
+              }] : [{
                 what: 'La base de données n\'est pas encore à jour pour la version 2.',
-                fix: 'Exécute le fichier <b>supabase/migration-v2.sql</b> dans le SQL Editor de Supabase, en suivant la section <b>« Mettre la base de données à jour »</b> du guide <b>MISE-A-JOUR-V2.md</b>. Il ajoute seulement des colonnes : tes données ne bougent pas.'
+                fix: 'Exécute le fichier <b>supabase/migration-v2.sql</b> dans le SQL Editor de Supabase, en suivant la section <b>« Mettre la base de données à jour »</b> du guide <b>MISE-A-JOUR-V2.md</b>, puis <b>supabase/migration-v2b.sql</b> en suivant <b>MISE-A-JOUR-V2B.md</b>. Ils ajoutent seulement des colonnes : tes données ne bougent pas.'
               }]
             };
           }

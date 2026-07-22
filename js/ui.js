@@ -41,8 +41,9 @@
       '<div class="form-err" data-err hidden></div>' +
       contenuHtml +
       '<div class="modal-actions">' +
-      '<button type="button" class="btn-ghost" style="flex:1" data-annuler>Annuler</button>' +
-      '<button type="submit" class="btn" data-testid="modal-submit">' + esc(options.valider || 'Enregistrer') + '</button>' +
+      '<button type="button" class="btn-ghost" style="flex:1" data-annuler data-testid="modal-annuler">Annuler</button>' +
+      '<button type="submit" class="btn' + (options.danger ? ' danger' : '') + '" data-testid="modal-submit">' +
+      esc(options.valider || 'Enregistrer') + '</button>' +
       '</div></form>';
 
     function close() {
@@ -79,6 +80,27 @@
     });
   }
 
+  /* Confirmation d'un geste qui efface vraiment quelque chose.
+     Trois différences avec confirmer() : le texte peut contenir des chiffres en
+     gras (c'est le but — on annonce les conséquences exactes), le bouton dit ce
+     qu'il fait plutôt qu'« OK », et c'est ANNULER qui garde le focus, pour
+     qu'une touche Entrée réflexe n'efface rien. */
+  function confirmerDanger(titre, htmlTexte, labelValider, onOui) {
+    var m = modal(titre, '', '<div class="danger-note" data-testid="danger-note">' + htmlTexte + '</div>', {
+      valider: labelValider,
+      danger: true,
+      onSubmit: function (form, close) { close(); onOui(); }
+    });
+    /* Le focus est mis sur Annuler ET rendu VISIBLE. Un focus posé par le code
+       après un clic de souris n'active pas « :focus-visible » dans Chrome : sans
+       cette classe, le bouton serait sélectionné sans que ça se voie, et la
+       protection ne protégerait que sur le papier. */
+    var annuler = $('[data-annuler]', m.root);
+    annuler.classList.add('focus-visible-force');
+    annuler.focus();
+    return m;
+  }
+
   /* Télécharge un fichier CSV (BOM UTF-8 pour qu'Excel affiche les accents). */
   function telechargerCSV(nomFichier, contenu) {
     var blob = new Blob(['﻿' + contenu], { type: 'text/csv;charset=utf-8;' });
@@ -95,6 +117,7 @@
   root.HF = root.HF || {};
   root.HF.ui = {
     $: $, $$: $$, esc: esc, initiales: initiales,
-    toast: toast, modal: modal, confirmer: confirmer, telechargerCSV: telechargerCSV
+    toast: toast, modal: modal, confirmer: confirmer, confirmerDanger: confirmerDanger,
+    telechargerCSV: telechargerCSV
   };
 })(typeof globalThis !== 'undefined' ? globalThis : this);

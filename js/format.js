@@ -31,6 +31,16 @@
     return groupe(v, dec) + NBSP + '$';
   }
 
+  /* Argent avec TOUJOURS deux décimales : "700,00 $", "2 100,00 $".
+     Réservé aux aperçus et aux relevés, où « 700 $ » et « 700,00 $ » ne
+     rassurent pas pareil : quand on annonce ce qui va être prélevé, les cents
+     doivent être visibles même quand ils valent zéro. Le reste de l'application
+     garde money(), qui masque les décimales inutiles. */
+  function moneyExact(n) {
+    var v = Math.round((Number(n) || 0) * 100) / 100;
+    return groupe(v, 2) + NBSP + '$';
+  }
+
   /* Argent compact pour les grands nombres de graphique : "12,9 k$" */
   function moneyCourt(n) {
     var v = Number(n) || 0;
@@ -91,6 +101,14 @@
     return Number(p[2]) + ' ' + MOIS_ABREGES[Number(p[1]) - 1];
   }
 
+  /* "2026-05-15" -> "15 mai" — sans l'année, pour les phrases d'aperçu qui
+     parlent d'une échéance toute proche : « le 15 mai » se lit mieux que
+     « le 15 mai 2026 » quand on est en avril. */
+  function dateJourMois(iso) {
+    var p = String(iso).split('-');
+    return Number(p[2]) + ' ' + MOIS[Number(p[1]) - 1];
+  }
+
   /* "2025-11-01" -> "nov. 2025" — pour les dépenses récurrentes, où l'année compte. */
   function moisAnnee(iso) {
     var p = String(iso).split('-');
@@ -110,6 +128,7 @@
   var api = {
     NBSP: NBSP,
     money: money,
+    moneyExact: moneyExact,
     moneyCourt: moneyCourt,
     nombre: nombre,
     pourcent: pourcent,
@@ -121,6 +140,7 @@
     moisAnnee: moisAnnee,
     dateLongue: dateLongue,
     dateCourte: dateCourte,
+    dateJourMois: dateJourMois,
     ilYA: ilYA
   };
 

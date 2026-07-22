@@ -37,10 +37,11 @@
         split_a_pct: 50,
         daily_ad_budget: 120,
         monthly_goal: 12000,
-        monthly_goal_overrides: {}
+        monthly_goal_overrides: {},
+        split_history: {}
       },
       clients: [], sales: [], payments: [],
-      ad_spend: [], recurring_expenses: [], one_off_expenses: []
+      ad_spend: [], recurring_expenses: [], one_off_expenses: [], payouts: []
     };
 
     var nc = 0, ns = 0, np = 0, na = 0, nr = 0, no = 0;
@@ -222,6 +223,29 @@
       category: 'logiciels', date: jour(mk, 2),
       created_by: EMAIL_A, created_at: today,
       deleted_at: jourPlus(today, -5) + 'T12:00:00.000Z'
+    });
+
+    /* --- Versements aux associés ---
+       Irréguliers, comme dans la vraie vie : les deux associés se sont versé
+       de l'argent quelques fois, jamais le même mois ni le même montant.
+       Il en manque exprès : le BILAN doit montrer un solde dû non nul. */
+    var nv = 0;
+    [
+      // Montants volontairement INFÉRIEURS à la part gagnée : la démo doit
+      // montrer le cas normal — l'entreprise doit encore quelque chose aux deux
+      // associés — et non un solde négatif, qui est l'exception.
+      ['a', 6, 12, 400, 'Virement Interac'],
+      ['b', 6, 12, 400, 'Virement Interac'],
+      ['a', 4, 8, 300, null],
+      ['b', 2, 15, 250, 'Acompte']
+    ].forEach(function (v) {
+      var vmk = C.addMonths(mk, -v[1]);
+      db.payouts.push({
+        id: 'v' + (++nv), partner: v[0],
+        date: jour(vmk, Math.min(v[2], C.daysInMonth(vmk))),
+        amount: v[3], note: v[4],
+        created_by: v[0] === 'a' ? EMAIL_A : EMAIL_B, created_at: today
+      });
     });
 
     return db;

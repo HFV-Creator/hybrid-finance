@@ -37,6 +37,10 @@ create table if not exists settings (
   monthly_goal     numeric(12,2),  -- objectif de revenu mensuel ; vide (NULL) = pas d'objectif
   monthly_goal_overrides jsonb    not null default '{}',  -- exceptions mois par mois, ex. {"2026-07": 15000}
   updated_at       timestamptz    default now(),
+  -- Le pourcentage de partage tel qu'il était convenu MOIS PAR MOIS,
+  -- ex. {"2026-05": 60, "2026-06": 50}. Sans ça, changer le partage
+  -- aujourd'hui recalculerait les mois passés avec le nouveau chiffre.
+  split_history    jsonb          not null default '{}',
   constraint settings_id_unique_row check (id = 1),
   constraint settings_split_a_pct_valide check (split_a_pct >= 0 and split_a_pct <= 100)
 );
@@ -184,6 +188,30 @@ create table if not exists one_off_expenses (
 create index if not exists one_off_expenses_date_idx on one_off_expenses (date);
 
 
+-- ---------------------------------------------------------------------
+-- Table « payouts » — l'argent qu'on se VERSE, à Steph ou à Alex.
+-- Ce n'est PAS une dépense : une dépense sort de l'entreprise (ads,
+-- logiciels...), un versement transfère à un associé une part du profit
+-- déjà gagné. Un versement ne change donc jamais les revenus, les
+-- dépenses, le profit, la marge ni le ROAS : il réduit seulement ce que
+-- l'entreprise doit encore à cet associé.
+-- « partner » vaut 'a' (associé A) ou 'b' (associé B), rien d'autre.
+-- ---------------------------------------------------------------------
+create table if not exists payouts (
+  id          uuid primary key default gen_random_uuid(),
+  partner     text          not null,          -- 'a' = associé A, 'b' = associé B
+  date        date          not null,
+  amount      numeric(12,2) not null,
+  note        text,           -- libre : « virement Desjardins », « avance de juin »...
+  created_by  text,
+  created_at  timestamptz   default now(),
+  deleted_at  timestamptz,   -- vide (NULL) = vivant ; une date = dans la corbeille (30 jours)
+  constraint payouts_partner_valide check (partner in ('a', 'b'))
+);
+
+create index if not exists payouts_date_idx on payouts (date);
+
+
 -- =====================================================================
 -- SÉCURITÉ — Row Level Security (RLS)
 -- =====================================================================
@@ -207,6 +235,7 @@ alter table payments           enable row level security;
 alter table ad_spend           enable row level security;
 alter table recurring_expenses enable row level security;
 alter table one_off_expenses   enable row level security;
+alter table payouts            enable row level security;
 
 drop policy if exists "acces_associes_settings" on settings;
 create policy "acces_associes_settings" on settings
@@ -234,6 +263,10 @@ create policy "acces_associes_recurring_expenses" on recurring_expenses
 
 drop policy if exists "acces_associes_one_off_expenses" on one_off_expenses;
 create policy "acces_associes_one_off_expenses" on one_off_expenses
+  for all to authenticated using (true) with check (true);
+
+drop policy if exists "acces_associes_payouts" on payouts;
+create policy "acces_associes_payouts" on payouts
   for all to authenticated using (true) with check (true);
 
 

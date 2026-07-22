@@ -246,7 +246,10 @@ button.pill:hover { filter: brightness(1.35); }
   cursor: pointer; transition: .15s;
 }
 .btn-mini:hover { color: var(--text); border-color: var(--muted); }
-.btn-mini.danger:hover { color: var(--red); border-color: var(--red); }
+/* Un bouton qui efface doit se voir AU REPOS : sur un téléphone il n'y a pas de
+   survol, et « Archiver » et « Supprimer » ne doivent jamais se ressembler. */
+.btn-mini.danger { color: var(--red); border-color: var(--red-fond-fort); }
+.btn-mini.danger:hover { border-color: var(--red); background: var(--red-fond); }
 .row-actions { display: flex; gap: 6px; justify-content: flex-end; }
 .actions-row { display: flex; gap: 10px; flex-wrap: wrap; }
 .actions-row .btn { flex: 1; min-width: 200px; }
@@ -518,6 +521,105 @@ input.date-inline {
 .copie-ligne .quoi { flex: 1; font-size: 13.5px; }
 .copie-ligne .combien { font-family: var(--font-mono); font-weight: 600; white-space: nowrap; }
 
+/* ---------- BILAN : période, totaux, soldes ---------- */
+.periode { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+.periode button {
+  background: var(--surface-3); border: 1px solid var(--line); color: var(--muted);
+  padding: 10px 16px; border-radius: 99px; font-size: 13px; font-weight: 600;
+  cursor: pointer; transition: .15s;
+}
+.periode button:hover { color: var(--text); }
+.periode button.active { background: var(--btn-fond); border-color: var(--btn-fond); color: var(--btn-texte); }
+.bilan-portee {
+  font-size: 13px; color: var(--muted); margin-bottom: 18px;
+  font-family: var(--font-mono);
+}
+.bilan-portee b { color: var(--text); }
+
+.bloc-chiffre { display: flex; justify-content: space-between; gap: 14px; padding: 9px 0; border-bottom: 1px solid var(--line-soft); }
+.bloc-chiffre:last-child { border-bottom: none; }
+.bloc-chiffre .lab { color: var(--muted); font-size: 13.5px; }
+.bloc-chiffre .val { font-family: var(--font-mono); font-weight: 600; white-space: nowrap; }
+.bloc-chiffre.fort .lab { color: var(--text); font-weight: 600; }
+.bloc-chiffre.fort .val { font-size: 16px; }
+
+/* La carte d'un associé : le solde dû est le chiffre qui domine. */
+.carte-associe { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px 22px; }
+.carte-associe.a { border-top: 3px solid var(--orange); }
+.carte-associe.b { border-top: 3px solid var(--blue); }
+.carte-associe .qui {
+  font-family: var(--font-display); font-weight: 800; font-size: 18px;
+  text-transform: uppercase; letter-spacing: .02em;
+}
+.solde-big {
+  font-family: var(--font-display); font-weight: 900; font-size: 44px;
+  line-height: 1.05; margin: 10px 0 2px; letter-spacing: -.02em;
+}
+.solde-big.du { color: var(--gold); }
+.solde-big.carre { color: var(--teal); }
+.solde-big.trop { color: var(--red); }
+.solde-quoi { font-size: 13px; color: var(--muted); margin-bottom: 14px; }
+
+/* Ligne « solde à ce jour » sous la barre de répartition du tableau de bord. */
+.solde-ligne {
+  display: block; width: 100%; margin-top: 12px; padding: 9px 12px;
+  background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: var(--radius-sm); color: var(--muted);
+  font-size: 12.5px; text-align: left; cursor: pointer; transition: .15s;
+}
+.solde-ligne:hover { border-color: var(--muted); color: var(--text); }
+.solde-ligne b { font-family: var(--font-mono); color: var(--text); }
+.solde-ligne::after { content: ' →'; font-family: var(--font-mono); }
+
+/* ---------- Relevé (le compteur) ---------- */
+.releve { margin-bottom: 22px; }
+.releve-titre {
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600;
+  letter-spacing: .14em; text-transform: uppercase; color: var(--muted);
+  margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid var(--blue);
+  display: inline-block;
+}
+.mvt-plus { color: var(--teal); font-family: var(--font-mono); font-weight: 600; white-space: nowrap; }
+.mvt-moins { color: var(--orange); font-family: var(--font-mono); font-weight: 600; white-space: nowrap; }
+/* La colonne que l'œil suit : le solde après chaque mouvement. */
+td.solde-col { font-family: var(--font-mono); font-weight: 700; text-align: right; white-space: nowrap; }
+tr.ligne-versement td { background: var(--surface-2); }
+
+.aide-bloc {
+  margin-top: 14px; padding: 11px 13px; background: var(--surface-2);
+  border-radius: var(--radius-sm); color: var(--muted); font-size: 12.5px;
+}
+
+/* ---------- Confirmation d'une suppression définitive ---------- */
+/* Le bouton qui a le focus dans une confirmation dangereuse doit se VOIR :
+   c'est lui qui répond à la touche Entrée, et c'est « Annuler ». */
+.btn-ghost.focus-visible-force {
+  outline: 2px solid var(--blue-soft);
+  outline-offset: 2px;
+  color: var(--text);
+  border-color: var(--blue-soft);
+}
+.danger-note { font-size: 14px; line-height: 1.55; }
+.danger-note b { color: var(--red); }
+.btn.danger { background: var(--red); color: var(--sur-blue); }
+.btn.danger:hover { background: var(--red); filter: brightness(1.15); color: var(--sur-blue); }
+
+/* ---------- Aperçu vivant sous un formulaire de vente ---------- */
+.apercu {
+  background: var(--blue-fond); border: 1px solid var(--blue);
+  border-radius: var(--radius-sm); padding: 11px 13px; margin: 0 0 16px;
+  font-size: 13.5px; color: var(--text);
+}
+.apercu b { color: var(--blue-soft); }
+
+/* ---------- Avertissement de client en double ---------- */
+.doublon {
+  background: var(--gold-fond); border: 1px solid var(--gold-fond-fort);
+  border-radius: var(--radius-sm); padding: 12px 14px; margin: 0 0 16px; font-size: 13px;
+}
+.doublon b { color: var(--gold); }
+.doublon .actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+
 /* ---------- Application « comme une app » sur téléphone ----------
    Tenir une carte ou un chiffre ne doit pas surligner du texte ni amorcer un
    glisser ; les champs de formulaire, eux, restent sélectionnables. */
@@ -547,6 +649,10 @@ body {
   .traiter-ligne .qui { min-width: 100%; }
   .traiter-actions { width: 100%; justify-content: flex-end; }
   .btn-traiter { min-height: 36px; }
+  /* Le relevé et le tableau mois par mois sont larges : c'est le tableau qui
+     défile dans sa carte, jamais la page. */
+  .periode button { flex: 1; min-width: 44%; min-height: 40px; }
+  .solde-big { font-size: 36px; }
 }
 
 /* ---------- Téléphone ---------- */

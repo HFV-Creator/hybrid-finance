@@ -84,6 +84,7 @@
       <nav class="tabs" id="tabs">
         <button data-vue="dashboard" class="active" data-testid="tab-dashboard">Tableau de bord</button>
         <button data-vue="traiter" data-testid="tab-traiter">À traiter</button>
+        <button data-vue="bilan" data-testid="tab-bilan">Bilan</button>
         <button data-vue="clients" data-testid="tab-clients">Clients &amp; ventes</button>
         <button data-vue="depenses" data-testid="tab-depenses">Dépenses</button>
         <button data-vue="reglages" data-testid="tab-reglages">Réglages</button>
@@ -121,6 +122,8 @@
               <span>Versé le 1<sup>er</sup> du mois suivant</span>
               <span id="split-ytd"></span>
             </div>
+            <!-- Le compteur : ce qui reste dû à chacun, tous mois confondus. -->
+            <button class="solde-ligne" id="solde-ligne" data-testid="solde-ligne" hidden></button>
           </div>
         </div>
 
@@ -284,6 +287,79 @@
       </section>
     </div>
 
+    <!-- ---------- VUE BILAN ---------- -->
+    <div id="vue-bilan" hidden>
+      <section>
+        <div class="sec-head">
+          <h2>Bilan</h2><div class="rule"></div>
+          <span class="hint">Ce que l'entreprise a gagné, ce que chacun a reçu, ce qui reste dû</span>
+        </div>
+
+        <div class="periode" id="bilan-periode" data-testid="bilan-periode">
+          <button type="button" data-periode="debut" class="active" data-testid="periode-debut">Depuis le début</button>
+          <button type="button" data-periode="annee" data-testid="periode-annee">Année en cours</button>
+          <button type="button" data-periode="perso" data-testid="periode-perso">Plage personnalisée</button>
+        </div>
+        <div class="form-row" id="bilan-perso" hidden>
+          <label class="field"><span>Du</span><input type="date" id="bilan-du" data-testid="bilan-du"></label>
+          <label class="field"><span>Au</span><input type="date" id="bilan-au" data-testid="bilan-au"></label>
+        </div>
+        <div class="bilan-portee" id="bilan-portee" data-testid="bilan-portee"></div>
+
+        <div class="grid-2">
+          <div class="card" id="bilan-totaux" data-testid="bilan-totaux"></div>
+          <div class="card" id="bilan-depenses" data-testid="bilan-depenses"></div>
+        </div>
+      </section>
+
+      <section>
+        <div class="sec-head">
+          <h2>Solde par associé</h2><div class="rule"></div>
+          <span class="hint">Calculé sur l'argent encaissé</span>
+        </div>
+        <div class="grid-2" id="bilan-partenaires" data-testid="bilan-partenaires"></div>
+      </section>
+
+      <section>
+        <div class="sec-head">
+          <h2>Relevé</h2><div class="rule"></div>
+          <span class="hint">Chaque mouvement, et le solde après chacun</span>
+        </div>
+        <div id="bilan-releves" data-testid="bilan-releves"></div>
+      </section>
+
+      <section>
+        <div class="sec-head">
+          <h2>Versements</h2><div class="rule"></div>
+          <span class="hint">L'argent réellement sorti vers un associé</span>
+        </div>
+        <div class="card">
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr><th>Date</th><th>Associé</th><th class="right">Montant</th><th>Note</th><th>Ajouté par</th><th class="right">Actions</th></tr>
+              </thead>
+              <tbody id="versements-body" data-testid="versements-body"></tbody>
+            </table>
+          </div>
+          <p class="aide-bloc">Un versement n'est pas une dépense : il distribue un profit déjà gagné.
+            Il ne change ni le profit, ni les dépenses, ni la part de personne — il fait seulement
+            baisser le solde dû à l'associé payé.</p>
+          <button class="add-row" id="btn-add-versement" data-testid="btn-add-versement">+ Enregistrer un versement</button>
+        </div>
+      </section>
+
+      <section>
+        <div class="sec-head">
+          <h2>Mois par mois</h2><div class="rule"></div>
+          <span class="hint">Pour retrouver d'où vient un écart</span>
+        </div>
+        <div class="card">
+          <div class="table-scroll" id="bilan-mois" data-testid="bilan-mois"></div>
+        </div>
+      </section>
+    </div>
+
     <!-- ---------- VUE CLIENTS ---------- -->
     <div id="vue-clients" hidden>
       <section>
@@ -304,6 +380,7 @@
             </table>
           </div>
           <button class="add-row" id="btn-add-client-2" data-testid="btn-add-client-2">+ Ajouter un client / une vente</button>
+          <button class="btn-mini" id="btn-archives" data-testid="btn-archives" style="margin-top:12px" hidden></button>
         </div>
       </section>
 
